@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flux2 — Image Generator</title>
+  <meta name="description" content="Custom Flux2 Klein image generation interface with multi-LoRA support" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Header -->
+    <header id="header">
+      <div class="header-brand">
+        <div class="logo-icon">⚡</div>
+        <h1>Flux2 <span class="accent">Klein</span></h1>
+      </div>
+      <div class="header-status">
+        <span id="pipeline-status" class="status-badge offline">Connecting…</span>
+      </div>
+    </header>
+
+    <!-- Main Layout -->
+    <main id="main-layout">
+      <!-- Left Panel: Controls -->
+      <aside id="controls-panel">
+        <!-- Prompt Section -->
+        <section class="panel-section" id="prompt-section">
+          <h2 class="section-title">Prompt</h2>
+          <textarea id="prompt-input" placeholder="Describe the image you want to generate…" rows="4"></textarea>
+          <h2 class="section-title sub">Negative Prompt</h2>
+          <textarea id="negative-prompt-input" placeholder="What to avoid…" rows="2"></textarea>
+        </section>
+
+        <!-- Resolution + Output Quality -->
+        <section class="panel-section" id="resolution-section">
+          <h2 class="section-title">Resolution</h2>
+          <!-- Image Upload for Auto Dimensions -->
+          <div class="upload-zone" id="upload-zone">
+            <input type="file" id="image-upload" accept="image/*" />
+            <label for="image-upload" class="upload-label">
+              <span class="upload-icon">📷</span>
+              <span>Upload image to auto-detect dimensions</span>
+            </label>
+          </div>
+          <div class="settings-grid two-col">
+            <div class="setting-item">
+              <label for="width-input">Base Width</label>
+              <input type="number" id="width-input" value="1024" min="256" max="4096" step="64" />
+            </div>
+            <div class="setting-item">
+              <label for="height-input">Base Height</label>
+              <input type="number" id="height-input" value="1024" min="256" max="4096" step="64" />
+            </div>
+          </div>
+          <div class="resolution-meta">
+            <span id="megapixel-display">1.00 MP</span>
+            <span id="aspect-display">1:1</span>
+          </div>
+          <h2 class="section-title sub">Output Quality</h2>
+          <div class="preset-bar">
+            <select id="preset-select">
+              <option value="native">Native (use base dimensions)</option>
+              <!-- populated dynamically from /api/presets -->
+            </select>
+          </div>
+          <div class="output-dims" id="output-dims">
+            <span>Output: <strong id="output-width">1024</strong> × <strong id="output-height">1024</strong></span>
+            <span class="output-mp" id="output-mp">1.00 MP</span>
+          </div>
+        </section>
+
+        <!-- Generation Settings -->
+        <section class="panel-section" id="settings-section">
+          <h2 class="section-title">Generation</h2>
+          <div class="settings-grid">
+            <div class="setting-item full-width">
+              <label for="steps-slider">Steps <span class="value-display" id="steps-value">50</span></label>
+              <input type="range" id="steps-slider" min="1" max="200" value="50" />
+            </div>
+            <div class="setting-item full-width">
+              <label for="guidance-slider">Guidance Scale <span class="value-display" id="guidance-value">4.0</span></label>
+              <input type="range" id="guidance-slider" min="0" max="30" step="0.5" value="4.0" />
+            </div>
+            <div class="setting-item">
+              <label for="seed-input">Seed (-1 = random)</label>
+              <input type="number" id="seed-input" value="-1" min="-1" />
+            </div>
+            <div class="setting-item">
+              <label for="num-images-input">Images</label>
+              <input type="number" id="num-images-input" value="1" min="1" max="4" />
+            </div>
+          </div>
+        </section>
+
+        <!-- LoRA Section -->
+        <section class="panel-section" id="lora-section">
+          <h2 class="section-title">LoRA Adapters</h2>
+          <div id="lora-list" class="lora-list">
+            <!-- Loaded LoRAs rendered here -->
+          </div>
+          <div class="lora-add-form">
+            <input type="text" id="lora-name-input" placeholder="Name" />
+            <input type="text" id="lora-path-input" placeholder="Path or URL to .safetensors" />
+            <div class="lora-add-row">
+              <label>Strength <span class="value-display" id="lora-strength-value">1.00</span></label>
+              <input type="range" id="lora-strength-input" min="0" max="2" step="0.05" value="1.0" />
+            </div>
+            <button id="lora-add-btn" class="btn btn-secondary">+ Add LoRA</button>
+          </div>
+          <div class="lora-available-section">
+            <h3 class="section-subtitle">Available on Disk</h3>
+            <div id="available-loras-list" class="lora-available-list">
+              <span class="muted">Scanning…</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Generate Button -->
+        <button id="generate-btn" class="btn btn-primary">
+          <span class="btn-label">Generate</span>
+          <span class="btn-spinner hidden" id="generate-spinner"></span>
+        </button>
+      </aside>
+
+      <!-- Center: Preview -->
+      <section id="preview-panel">
+        <div id="preview-container">
+          <div id="preview-placeholder">
+            <div class="placeholder-icon">🎨</div>
+            <p>Your generated image will appear here</p>
+          </div>
+          <img id="preview-image" class="hidden" alt="Generated image" />
+        </div>
+        <div id="preview-meta" class="hidden">
+          <span id="meta-resolution"></span>
+          <span id="meta-steps"></span>
+          <span id="meta-seed"></span>
+        </div>
+      </section>
+
+      <!-- Right Panel: History -->
+      <aside id="history-panel">
+        <h2 class="section-title">History</h2>
+        <div id="history-list">
+          <span class="muted">No images yet</span>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
