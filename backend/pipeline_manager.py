@@ -9,11 +9,14 @@ Handles:
 """
 
 import os
+import json
 import random
 import torch
 import logging
+from functools import wraps
 from pathlib import Path
 from PIL import Image
+from safetensors import safe_open
 
 from diffusers import (
     Flux2KleinPipeline,
@@ -34,45 +37,124 @@ logger = logging.getLogger(__name__)
 
 def _patch_diffusers_flux2_key_map():
     """
-    Monkey-patch missing BFL native-format key mappings into diffusers'
-    FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP.
+    Monkey-patch diffusers' FLUX2 single-file converter for older releases.
 
-    The CivitAI safetensors uses BFL/ComfyUI native key names such as
-    `img_attn.norm.key_norm` and `img_attn.norm.query_norm` which were
-    not included in older diffusers releases. This patch adds them so
-    from_single_file works regardless of installed diffusers version.
+    Some diffusers builds ship `convert_flux2_transformer_checkpoint_to_diffusers`
+    without stripping the `model.diffusion_model.` prefix that appears in
+    CivitAI/BFL checkpoints. That makes `from_single_file()` look up keys like
+    `double_blocks.0.img_attn.norm.key_norm` in the wrong map and crash with a
+    `KeyError`.
+
+    We normalize the checkpoint keys before delegating to diffusers' native
+    converter, then update every reference used by `from_single_file()` so the
+    patched function is guaranteed to run.
     """
     try:
+        import diffusers.loaders.single_file_model as sfm
         import diffusers.loaders.single_file_utils as sfu
 
-        # Keys present in BFL/ComfyUI native checkpoints that older
-        # diffusers builds don't know how to remap.
-        missing = {
-            # img (image) stream norms
-            "img_attn.norm.key_norm":   "attn.norm_k",
-            "img_attn.norm.query_norm": "attn.norm_q",
-            # txt (text) stream norms
-            "txt_attn.norm.key_norm":   "attn.norm_k",
-            "txt_attn.norm.query_norm": "attn.norm_q",
-        }
+        original_converter = getattr(sfu, "convert_flux2_transformer_checkpoint_to_diffusers")
+        if getattr(original_converter, "_flxapp_flux2_patch", False):
+            logger.info("FLUX2 single-file converter already patched.")
+            return
 
-        patched = 0
-        for native_key, diffusers_key in missing.items():
-            if native_key not in sfu.FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP:
-                sfu.FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP[native_key] = diffusers_key
-                patched += 1
+        @wraps(original_converter)
+        def patched_converter(checkpoint, **kwargs):
+            normalized_checkpoint = {
+                key.removeprefix("model.diffusion_model."): value
+                for key, value in checkpoint.items()
+            }
+            return original_converter(dict(normalized_checkpoint), **kwargs)
 
-        if patched:
-            logger.info(
-                "Patched %d missing key(s) into FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP "
-                "(diffusers version too old).",
-                patched,
-            )
-        else:
-            logger.info("FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP already up to date.")
+        patched_converter._flxapp_flux2_patch = True
+
+        sfu.convert_flux2_transformer_checkpoint_to_diffusers = patched_converter
+        sfm.convert_flux2_transformer_checkpoint_to_diffusers = patched_converter
+
+        loadable_class = sfm.SINGLE_FILE_LOADABLE_CLASSES.get("Flux2Transformer2DModel")
+        if loadable_class is not None:
+            loadable_class["checkpoint_mapping_fn"] = patched_converter
+
+        logger.info(
+            "Patched diffusers FLUX2 single-file converter to normalize "
+            "`model.diffusion_model.` checkpoint prefixes."
+        )
 
     except (AttributeError, ImportError) as e:
-        logger.warning("Could not patch FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP: %s", e)
+        logger.warning("Could not patch diffusers FLUX2 single-file converter: %s", e)
+
+
+def _infer_flux2_transformer_config(transformer_path: str) -> tuple[dict[str, object], Path]:
+    """
+    Build a local diffusers config that matches the downloaded transformer checkpoint.
+
+    This avoids diffusers' checkpoint heuristics selecting the wrong upstream repo
+    (for example `FLUX.2-dev`) when loading a community `.safetensors` file.
+    """
+    checkpoint_path = Path(transformer_path)
+    config_root = checkpoint_path.parent / f"{checkpoint_path.stem}.diffusers_config"
+    config_dir = config_root / "transformer"
+    config_path = config_dir / "config.json"
+
+    with safe_open(str(checkpoint_path), framework="pt", device="cpu") as handle:
+        keys = list(handle.keys())
+
+        def get_shape(key: str) -> tuple[int, ...]:
+            return tuple(handle.get_tensor(key).shape)
+
+        img_in_shape = get_shape("model.diffusion_model.img_in.weight")
+        txt_in_shape = get_shape("model.diffusion_model.txt_in.weight")
+        time_in_shape = get_shape("model.diffusion_model.time_in.in_layer.weight")
+        final_out_shape = get_shape("model.diffusion_model.final_layer.linear.weight")
+        q_norm_shape = get_shape("model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.weight")
+        double_mlp_in_shape = get_shape("model.diffusion_model.double_blocks.0.img_mlp.0.weight")
+
+        inner_dim, in_channels = img_in_shape
+        out_channels = final_out_shape[0]
+        attention_head_dim = q_norm_shape[0]
+        num_attention_heads = inner_dim // attention_head_dim
+        joint_attention_dim = txt_in_shape[1]
+        timestep_guidance_channels = time_in_shape[1]
+        num_layers = len(
+            {
+                int(key.split(".")[3])
+                for key in keys
+                if key.startswith("model.diffusion_model.double_blocks.")
+            }
+        )
+        num_single_layers = len(
+            {
+                int(key.split(".")[3])
+                for key in keys
+                if key.startswith("model.diffusion_model.single_blocks.")
+            }
+        )
+        guidance_embeds = "model.diffusion_model.guidance_in.in_layer.weight" in keys
+        mlp_ratio = double_mlp_in_shape[0] / (2 * inner_dim)
+
+    config = {
+        "_class_name": "Flux2Transformer2DModel",
+        "_diffusers_version": "0.37.0.dev0",
+        "patch_size": 1,
+        "in_channels": in_channels,
+        "out_channels": out_channels,
+        "num_layers": num_layers,
+        "num_single_layers": num_single_layers,
+        "attention_head_dim": attention_head_dim,
+        "num_attention_heads": num_attention_heads,
+        "joint_attention_dim": joint_attention_dim,
+        "timestep_guidance_channels": timestep_guidance_channels,
+        "mlp_ratio": mlp_ratio,
+        "axes_dims_rope": [32, 32, 32, 32],
+        "rope_theta": 2000,
+        "eps": 1e-6,
+        "guidance_embeds": guidance_embeds,
+    }
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+    return config, config_root
 
 
 class PipelineManager:
@@ -134,10 +216,24 @@ class PipelineManager:
         # Patch any missing key mappings in diffusers before loading
         _patch_diffusers_flux2_key_map()
 
+        transformer_config, transformer_config_root = _infer_flux2_transformer_config(self.transformer_path)
+        logger.info(
+            "Using local transformer config inferred from checkpoint: %s "
+            "(dim=%s, double_layers=%s, single_layers=%s, heads=%s x %s)",
+            transformer_config_root / "transformer" / "config.json",
+            transformer_config["num_attention_heads"] * transformer_config["attention_head_dim"],
+            transformer_config["num_layers"],
+            transformer_config["num_single_layers"],
+            transformer_config["num_attention_heads"],
+            transformer_config["attention_head_dim"],
+        )
+
         # ---------- Transformer (from CivitAI safetensors) ----------
         logger.info("Loading transformer from: %s", self.transformer_path)
         transformer = Flux2Transformer2DModel.from_single_file(
             self.transformer_path,
+            config=str(transformer_config_root),
+            subfolder="transformer",
             torch_dtype=torch.bfloat16,
         ).to("cuda")
 

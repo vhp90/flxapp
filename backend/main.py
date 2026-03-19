@@ -1,4 +1,5 @@
 import io
+import inspect
 import json
 import logging
 import textwrap
@@ -341,7 +342,17 @@ async def generate_image(req: GenerateRequest):
 
     try:
         if runtime.manager is not None and runtime.manager.pipe is not None:
-            result = runtime.manager.generate(**params, input_image=input_image)
+            allowed_keys = {
+                name
+                for name in inspect.signature(runtime.manager.generate).parameters
+                if name not in {"self", "input_image"}
+            }
+            generate_params = {
+                key: value
+                for key, value in params.items()
+                if key in allowed_keys
+            }
+            result = runtime.manager.generate(**generate_params, input_image=input_image)
         elif APP_SETTINGS.enable_mock_generation:
             result = _build_mock_images(params)
         else:

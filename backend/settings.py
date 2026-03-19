@@ -91,7 +91,7 @@ class AppSettings:
             ),
             flux2_repo_id=os.getenv(
                 "FLUX2_REPO_ID",
-                "black-forest-labs/FLUX.2-klein-4B",
+                "black-forest-labs/FLUX.2-klein-9B",
             ),
             civitai_model_version_id=os.getenv("CIVITAI_MODEL_VERSION_ID", "2746781"),
             hf_token=os.getenv("HF_TOKEN"),
