@@ -6,267 +6,274 @@
   <title>Flux2 Klein Studio</title>
   <meta
     name="description"
-    content="Studio-style Flux2 Klein interface with persistent source image flow, compare slider, and runtime-driven controls."
+    content="Professional AI image generation studio powered by FLUX.2 Klein — generate, compare, and iterate."
   />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link
-    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700&display=swap"
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap"
     rel="stylesheet"
   />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
   <div class="app-shell">
+    <!-- ─── Top toolbar ─── -->
     <header class="topbar">
-      <div>
-        <p class="eyebrow">Flux2 orchestration</p>
-        <h1>Flux2 Klein Studio</h1>
+      <div class="topbar-brand">
+        <div class="brand-icon">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><rect x="2" y="2" width="7" height="7" rx="2" fill="currentColor" opacity=".9"/><rect x="11" y="2" width="7" height="7" rx="2" fill="currentColor" opacity=".5"/><rect x="2" y="11" width="7" height="7" rx="2" fill="currentColor" opacity=".5"/><rect x="11" y="11" width="7" height="7" rx="2" fill="currentColor" opacity=".25"/></svg>
+        </div>
+        <span class="brand-name">Flux2 Studio</span>
+        <span class="brand-tag">Klein 9B</span>
       </div>
       <div class="topbar-actions">
         <span id="pipeline-status" class="status-pill offline">Checking runtime</span>
-        <button id="init-pipeline-btn" class="btn btn-secondary" type="button">Retry pipeline init</button>
+        <button id="init-pipeline-btn" class="btn btn-sm btn-surface" type="button">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 1v4M8 11v4M1 8h4M11 8h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          Retry init
+        </button>
       </div>
     </header>
 
     <section id="status-banner" class="status-banner hidden"></section>
 
+    <!-- ─── Main studio layout ─── -->
     <main class="studio-layout">
+
+      <!-- ========== LEFT SIDEBAR ========== -->
       <aside class="sidebar">
-        <section class="panel source-panel">
-          <div class="panel-header">
-            <div>
-              <p class="section-kicker">Source</p>
-              <h2>Generation input</h2>
+
+        <!-- Source panel -->
+        <section class="panel" data-panel="source">
+          <button class="panel-toggle" type="button">
+            <svg class="toggle-chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+            <span class="panel-title">Source Image</span>
+          </button>
+          <div class="panel-body">
+            <div class="upload-zone">
+              <input type="file" id="image-upload" accept="image/*" />
+              <label for="image-upload" class="upload-label">
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <span class="upload-text">Upload base image</span>
+                <span class="upload-hint">Anchors dimensions &amp; guides generation</span>
+              </label>
             </div>
-          </div>
 
-          <div class="upload-panel">
-            <input type="file" id="image-upload" accept="image/*" />
-            <label for="image-upload" class="upload-label">
-              <span class="upload-title">Upload base image</span>
-              <span class="upload-copy">
-                This stays as the source for generation until you explicitly promote a generated image.
-              </span>
-            </label>
-          </div>
-
-          <div id="source-card" class="source-card empty">
-            <div class="source-preview empty-state">
-              <p>No source image yet</p>
-              <span>Upload one to anchor dimensions and image-guided generation.</span>
-            </div>
-            <div class="source-copy">
-              <strong id="source-title">No source selected</strong>
-              <span id="source-description">The stage will show your upload here first.</span>
-            </div>
-          </div>
-
-          <div class="source-actions">
-            <button id="clear-source-btn" class="btn btn-ghost" type="button">Clear source</button>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="section-kicker">Prompting</p>
-              <h2>Build the request</h2>
-            </div>
-            <div class="panel-chip">Ctrl/Cmd + Enter</div>
-          </div>
-
-          <label class="field-label" for="prompt-input">Prompt</label>
-          <textarea
-            id="prompt-input"
-            rows="5"
-            placeholder="Describe the scene, camera, lighting, style, and composition."
-          ></textarea>
-
-          <label class="field-label" for="negative-prompt-input">Negative prompt</label>
-          <textarea
-            id="negative-prompt-input"
-            rows="3"
-            placeholder="What should the model avoid?"
-          ></textarea>
-
-          <div class="button-row">
-            <button id="generate-btn" class="btn btn-primary" type="button">
-              <span class="btn-label">Generate</span>
-              <span id="generate-spinner" class="btn-spinner hidden"></span>
-            </button>
-            <button id="clear-results-btn" class="btn btn-ghost" type="button">Clear results</button>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="section-kicker">Canvas</p>
-              <h2>Resolution and output</h2>
-            </div>
-          </div>
-
-          <div class="grid two-up">
-            <div class="field-group">
-              <label class="field-label" for="width-input">Width</label>
-              <input type="number" id="width-input" />
-            </div>
-            <div class="field-group">
-              <label class="field-label" for="height-input">Height</label>
-              <input type="number" id="height-input" />
-            </div>
-          </div>
-
-          <div class="meta-row">
-            <span id="megapixel-display">0.00 MP</span>
-            <span id="aspect-display">1:1</span>
-          </div>
-
-          <div class="field-group">
-            <label class="field-label" for="preset-select">Output preset</label>
-            <select id="preset-select"></select>
-          </div>
-
-          <div class="output-summary">
-            <div>
-              <p class="micro-label">Resolved output</p>
-              <strong><span id="output-width">0</span> x <span id="output-height">0</span></strong>
-            </div>
-            <span id="output-mp" class="summary-pill">0.00 MP</span>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="section-kicker">Sampling</p>
-              <h2>Generation controls</h2>
-            </div>
-          </div>
-          <div id="sampling-controls" class="dynamic-controls"></div>
-          <p class="panel-note">Aligned to FLUX.2 [klein] 9B distilled defaults: 4 steps and guidance 1.0.</p>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <div>
-              <p class="section-kicker">Adapters</p>
-              <h2>LoRA stack</h2>
-            </div>
-          </div>
-
-          <div id="lora-list" class="lora-list">
-            <span class="empty-copy">No LoRAs loaded.</span>
-          </div>
-
-          <div class="lora-form">
-            <div class="grid two-up">
-              <div class="field-group">
-                <label class="field-label" for="lora-name-input">Display name</label>
-                <input type="text" id="lora-name-input" placeholder="Portrait polish" />
+            <div id="source-card" class="source-card empty">
+              <div class="source-preview empty-state">
+                <p>No source image</p>
+                <span>Upload one to anchor dimensions.</span>
               </div>
-              <div class="field-group">
-                <label class="field-label" for="lora-strength-input">Strength</label>
-                <div class="slider-shell">
-                  <input type="range" id="lora-strength-input" min="0" max="2" step="0.05" value="1" />
-                  <span id="lora-strength-value" class="slider-value">1.00</span>
+              <div class="source-copy">
+                <strong id="source-title">No source selected</strong>
+                <span id="source-description">Upload an image to start.</span>
+              </div>
+            </div>
+            <button id="clear-source-btn" class="btn btn-sm btn-ghost" type="button">Clear source</button>
+          </div>
+        </section>
+
+        <!-- Prompt panel -->
+        <section class="panel" data-panel="prompt">
+          <button class="panel-toggle" type="button">
+            <svg class="toggle-chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+            <span class="panel-title">Prompt</span>
+            <kbd class="panel-kbd">⌘↵</kbd>
+          </button>
+          <div class="panel-body">
+            <div class="field">
+              <label class="field-label" for="prompt-input">Positive</label>
+              <textarea
+                id="prompt-input"
+                rows="4"
+                placeholder="Describe scene, camera, lighting, style…"
+              ></textarea>
+            </div>
+            <div class="field">
+              <label class="field-label" for="negative-prompt-input">Negative</label>
+              <textarea
+                id="negative-prompt-input"
+                rows="2"
+                placeholder="What the model should avoid"
+              ></textarea>
+            </div>
+            <div class="action-row">
+              <button id="generate-btn" class="btn btn-primary" type="button">
+                <span class="btn-label">Generate</span>
+                <span id="generate-spinner" class="btn-spinner hidden"></span>
+              </button>
+              <button id="clear-results-btn" class="btn btn-sm btn-ghost" type="button">Clear</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Resolution panel -->
+        <section class="panel" data-panel="canvas">
+          <button class="panel-toggle" type="button">
+            <svg class="toggle-chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+            <span class="panel-title">Resolution</span>
+          </button>
+          <div class="panel-body">
+            <div class="field-row">
+              <div class="field">
+                <label class="field-label" for="width-input">W</label>
+                <input type="number" id="width-input" />
+              </div>
+              <span class="field-separator">×</span>
+              <div class="field">
+                <label class="field-label" for="height-input">H</label>
+                <input type="number" id="height-input" />
+              </div>
+            </div>
+            <div class="info-chips">
+              <span id="megapixel-display" class="chip">0.00 MP</span>
+              <span id="aspect-display" class="chip">1:1</span>
+            </div>
+            <div class="field">
+              <label class="field-label" for="preset-select">Preset</label>
+              <select id="preset-select"></select>
+            </div>
+            <div class="output-summary">
+              <div class="output-summary-label">
+                <span class="summary-label-text">Output</span>
+                <strong><span id="output-width">0</span>×<span id="output-height">0</span></strong>
+              </div>
+              <span id="output-mp" class="chip chip-accent">0.00 MP</span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Sampling panel -->
+        <section class="panel" data-panel="sampling">
+          <button class="panel-toggle" type="button">
+            <svg class="toggle-chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+            <span class="panel-title">Sampling</span>
+          </button>
+          <div class="panel-body">
+            <div id="sampling-controls" class="controls-stack"></div>
+            <p class="panel-note">FLUX.2 [klein] 9B defaults: 4 steps, guidance 1.0</p>
+          </div>
+        </section>
+
+        <!-- LoRA panel -->
+        <section class="panel" data-panel="lora">
+          <button class="panel-toggle" type="button">
+            <svg class="toggle-chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+            <span class="panel-title">LoRA stack</span>
+          </button>
+          <div class="panel-body">
+            <div id="lora-list" class="lora-list">
+              <span class="empty-copy">No LoRAs loaded.</span>
+            </div>
+
+            <div class="lora-form">
+              <div class="field-row">
+                <div class="field" style="flex:1">
+                  <label class="field-label" for="lora-name-input">Name</label>
+                  <input type="text" id="lora-name-input" placeholder="My LoRA" />
+                </div>
+                <div class="field" style="flex:1">
+                  <label class="field-label" for="lora-strength-input">Strength</label>
+                  <div class="slider-shell">
+                    <input type="range" id="lora-strength-input" min="0" max="2" step="0.05" value="1" />
+                    <span id="lora-strength-value" class="slider-value">1.00</span>
+                  </div>
                 </div>
               </div>
+              <div class="field">
+                <label class="field-label" for="lora-path-input">Path</label>
+                <input type="text" id="lora-path-input" placeholder="./loras/example.safetensors" />
+              </div>
+              <button id="lora-add-btn" class="btn btn-sm btn-surface" type="button">Load LoRA</button>
             </div>
 
-            <div class="field-group">
-              <label class="field-label" for="lora-path-input">Path</label>
-              <input type="text" id="lora-path-input" placeholder="./loras/example.safetensors" />
-            </div>
-
-            <button id="lora-add-btn" class="btn btn-secondary" type="button">Load LoRA</button>
-          </div>
-
-          <div class="stack-block">
-            <p class="micro-label">Available on disk</p>
-            <div id="available-loras-list" class="available-loras-list">
-              <span class="empty-copy">Scanning local adapters.</span>
+            <div class="available-section">
+              <span class="section-label">Available on disk</span>
+              <div id="available-loras-list" class="available-loras-list">
+                <span class="empty-copy">Scanning…</span>
+              </div>
             </div>
           </div>
         </section>
 
-        <section class="panel runtime-panel">
-          <div class="panel-header">
-            <div>
-              <p class="section-kicker">Runtime</p>
-              <h2>Active configuration</h2>
-            </div>
+        <!-- Runtime panel -->
+        <section class="panel" data-panel="runtime">
+          <button class="panel-toggle" type="button">
+            <svg class="toggle-chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+            <span class="panel-title">Runtime</span>
+          </button>
+          <div class="panel-body">
+            <dl id="runtime-facts" class="runtime-facts"></dl>
           </div>
-          <dl id="runtime-facts" class="runtime-facts"></dl>
         </section>
       </aside>
 
+      <!-- ========== CENTER STAGE ========== -->
       <section class="stage-column">
         <section class="stage-panel">
-          <div class="stage-header">
-            <div>
-              <p class="section-kicker">Canvas</p>
-              <h2 id="stage-title">Studio canvas</h2>
-            </div>
+          <div class="stage-toolbar">
+            <h2 id="stage-title" class="stage-title">Canvas</h2>
+            <div id="canvas-meta" class="canvas-meta"></div>
             <div class="stage-actions">
-              <span id="compare-mode-badge" class="summary-pill hidden">Compare mode</span>
-              <button id="fullscreen-stage-btn" class="btn btn-secondary hidden" type="button">Fullscreen compare</button>
-              <button id="use-active-as-source-btn" class="btn btn-ghost hidden" type="button">Use active image as source</button>
+              <span id="compare-mode-badge" class="chip chip-accent hidden">Compare</span>
+              <button id="fullscreen-stage-btn" class="btn btn-sm btn-surface hidden" type="button">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                Fullscreen
+              </button>
+              <button id="use-active-as-source-btn" class="btn btn-sm btn-ghost hidden" type="button">Use as source</button>
             </div>
           </div>
 
-          <div id="canvas-meta" class="canvas-meta"></div>
-
+          <!-- Placeholder -->
           <div id="stage-placeholder" class="stage-placeholder">
-            <p class="stage-placeholder-title">Bring in a source, then render.</p>
-            <p class="stage-placeholder-copy">
-              Upload a base image to anchor the canvas, then generate and compare results with the vertical splitter.
-            </p>
+            <div class="placeholder-content">
+              <svg width="48" height="48" viewBox="0 0 48 48" fill="none"><rect x="6" y="6" width="36" height="36" rx="8" stroke="currentColor" stroke-width="2" opacity=".25"/><circle cx="18" cy="18" r="4" stroke="currentColor" stroke-width="2" opacity=".35"/><path d="M6 34l10-10 8 8 6-6 12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity=".3"/></svg>
+              <p class="placeholder-title">Upload a source, then generate</p>
+              <p class="placeholder-subtitle">Drag in an image or use the source panel to get started.</p>
+            </div>
           </div>
 
+          <!-- Single image view -->
           <div id="single-stage" class="single-stage hidden">
             <img id="single-stage-image" alt="Stage preview" />
             <div class="stage-label-row">
-              <span id="single-stage-label" class="stage-label">Preview</span>
+              <span id="single-stage-label" class="chip">Preview</span>
             </div>
           </div>
 
+          <!-- Compare view (slider ON the image) -->
           <div id="compare-stage" class="compare-stage hidden">
-            <div class="compare-surface">
+            <div id="compare-surface" class="compare-surface">
               <img id="compare-before-image" class="compare-image base" alt="Source image" />
               <div id="compare-after-shell" class="compare-after-shell">
                 <img id="compare-after-image" class="compare-image overlay" alt="Generated image" />
               </div>
-              <div id="compare-divider" class="compare-divider"></div>
+              <div id="compare-divider" class="compare-divider">
+                <div class="divider-handle">
+                  <svg width="8" height="20" viewBox="0 0 8 20" fill="none"><path d="M2 4v12M6 4v12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                </div>
+              </div>
               <div class="compare-label before">Source</div>
               <div class="compare-label after">Generated</div>
             </div>
-            <div class="compare-control">
-              <span class="micro-label">Before / after</span>
-              <input id="compare-slider" type="range" min="0" max="100" value="50" />
-            </div>
+            <!-- Hidden range input kept for JS compatibility -->
+            <input id="compare-slider" type="range" min="0" max="100" value="50" class="sr-only" />
           </div>
         </section>
 
+        <!-- Results dock -->
         <section class="dock-panel">
           <div class="dock-section">
             <div class="dock-header">
-              <div>
-                <p class="section-kicker">Fresh renders</p>
-                <h3>Current batch</h3>
-              </div>
-              <span id="result-count" class="summary-pill">0 images</span>
+              <span class="section-label">Current batch</span>
+              <span id="result-count" class="chip">0 images</span>
             </div>
             <div id="result-strip" class="thumb-grid"></div>
           </div>
-
           <div class="dock-section">
             <div class="dock-header">
-              <div>
-                <p class="section-kicker">Archive</p>
-                <h3>History</h3>
-              </div>
+              <span class="section-label">History</span>
             </div>
             <div id="history-list" class="history-grid">
               <span class="empty-copy">No images saved yet.</span>

@@ -43,6 +43,7 @@ const DOM = {
   compareAfterShell: $("#compare-after-shell"),
   compareDivider: $("#compare-divider"),
   compareSlider: $("#compare-slider"),
+  compareSurface: $("#compare-surface"),
   compareModeBadge: $("#compare-mode-badge"),
   fullscreenStageBtn: $("#fullscreen-stage-btn"),
   useActiveAsSourceBtn: $("#use-active-as-source-btn"),
@@ -62,6 +63,7 @@ const state = {
   activeResult: null,
   isGenerating: false,
   comparePosition: 50,
+  isDraggingCompare: false,
 };
 
 async function apiFetch(path, options = {}) {
@@ -314,7 +316,7 @@ function syncGenerateButton() {
 function setGenerating(isGenerating) {
   state.isGenerating = isGenerating;
   DOM.generateSpinner.classList.toggle("hidden", !isGenerating);
-  DOM.generateBtn.querySelector(".btn-label").textContent = isGenerating ? "Generating" : "Generate";
+  DOM.generateBtn.querySelector(".btn-label").textContent = isGenerating ? "Generating…" : "Generate";
   syncGenerateButton();
 }
 
@@ -329,12 +331,12 @@ function renderSourceCard() {
     DOM.sourceCard.className = "source-card empty";
     DOM.sourceCard.innerHTML = `
       <div class="source-preview empty-state">
-        <p>No source image yet</p>
-        <span>Upload one to anchor dimensions and image-guided generation.</span>
+        <p>No source image</p>
+        <span>Upload one to anchor dimensions.</span>
       </div>
       <div class="source-copy">
         <strong id="source-title">No source selected</strong>
-        <span id="source-description">The stage will show your upload here first.</span>
+        <span id="source-description">Upload an image to start.</span>
       </div>
     `;
     return;
@@ -349,17 +351,58 @@ function renderSourceCard() {
       <strong>${escapeHtml(state.sourceImage.label)}</strong>
       <span>${escapeHtml(state.sourceImage.description)}</span>
       <div class="stage-label-row">
-        <span class="source-tag">${state.sourceImage.width}x${state.sourceImage.height}</span>
+        <span class="source-tag">${state.sourceImage.width}×${state.sourceImage.height}</span>
         <span class="source-tag">${escapeHtml(state.sourceImage.kind)}</span>
       </div>
     </div>
   `;
 }
 
+/* ================================================================
+   Compare slider — interactive mouse/touch drag on the image
+   ================================================================ */
 function updateCompareSurface() {
   const position = `${state.comparePosition}%`;
   DOM.compareStage.style.setProperty("--compare-position", position);
   DOM.compareDivider.style.left = position;
+  // keep the hidden range in sync (for any external reads)
+  DOM.compareSlider.value = state.comparePosition;
+}
+
+function getComparePositionFromEvent(event) {
+  if (!DOM.compareSurface) return 50;
+  const rect = DOM.compareSurface.getBoundingClientRect();
+  const clientX = event.touches ? event.touches[0].clientX : event.clientX;
+  const x = clientX - rect.left;
+  return Math.max(0, Math.min(100, (x / rect.width) * 100));
+}
+
+function onComparePointerDown(event) {
+  event.preventDefault();
+  state.isDraggingCompare = true;
+  state.comparePosition = getComparePositionFromEvent(event);
+  updateCompareSurface();
+}
+
+function onComparePointerMove(event) {
+  if (!state.isDraggingCompare) return;
+  event.preventDefault();
+  state.comparePosition = getComparePositionFromEvent(event);
+  updateCompareSurface();
+}
+
+function onComparePointerUp() {
+  state.isDraggingCompare = false;
+}
+
+function bindCompareDrag() {
+  if (!DOM.compareSurface) return;
+  DOM.compareSurface.addEventListener("mousedown", onComparePointerDown);
+  DOM.compareSurface.addEventListener("touchstart", onComparePointerDown, { passive: false });
+  document.addEventListener("mousemove", onComparePointerMove);
+  document.addEventListener("touchmove", onComparePointerMove, { passive: false });
+  document.addEventListener("mouseup", onComparePointerUp);
+  document.addEventListener("touchend", onComparePointerUp);
 }
 
 function renderCanvasMeta() {
@@ -368,7 +411,7 @@ function renderCanvasMeta() {
     chunks.push(`<span>source: ${escapeHtml(state.sourceImage.label)}</span>`);
   }
   if (state.activeResult) {
-    chunks.push(`<span>${state.activeResult.width}x${state.activeResult.height}</span>`);
+    chunks.push(`<span>${state.activeResult.width}×${state.activeResult.height}</span>`);
     chunks.push(`<span>${state.activeResult.steps} steps</span>`);
     chunks.push(`<span>guidance ${Number(state.activeResult.guidance_scale).toFixed(1)}</span>`);
     chunks.push(`<span>seed ${state.activeResult.seed}</span>`);
@@ -388,11 +431,11 @@ function renderStage() {
   DOM.compareStage.classList.toggle("hidden", !canCompare);
   DOM.compareModeBadge.classList.toggle("hidden", !canCompare);
   DOM.fullscreenStageBtn.classList.toggle("hidden", !canCompare);
-  DOM.fullscreenStageBtn.textContent = document.fullscreenElement === DOM.stagePanel ? "Exit fullscreen" : "Fullscreen compare";
+  DOM.fullscreenStageBtn.querySelector(".btn-label")?.textContent;
   DOM.useActiveAsSourceBtn.classList.toggle("hidden", !active || (source && source.url === active.url));
 
   if (canCompare) {
-    DOM.stageTitle.textContent = "Before / after compare";
+    DOM.stageTitle.textContent = "Before / After";
     DOM.compareBeforeImage.src = `${source.url}?t=${Date.now()}`;
     DOM.compareAfterImage.src = `${active.url}?t=${Date.now()}`;
     updateCompareSurface();
@@ -400,20 +443,20 @@ function renderStage() {
   }
 
   if (active) {
-    DOM.stageTitle.textContent = "Generated preview";
+    DOM.stageTitle.textContent = "Generated";
     DOM.singleStageImage.src = `${active.url}?t=${Date.now()}`;
     DOM.singleStageLabel.textContent = "Generated";
     return;
   }
 
   if (source) {
-    DOM.stageTitle.textContent = "Source preview";
+    DOM.stageTitle.textContent = "Source";
     DOM.singleStageImage.src = `${source.url}?t=${Date.now()}`;
     DOM.singleStageLabel.textContent = "Source image";
     return;
   }
 
-  DOM.stageTitle.textContent = "Studio canvas";
+  DOM.stageTitle.textContent = "Canvas";
 }
 
 function clearResults() {
@@ -450,7 +493,7 @@ function renderResultStrip(items) {
             <img src="${item.url}" alt="Generated image ${index + 1}" />
             <div class="thumb-copy">
               <strong>${escapeHtml(truncate(item.prompt, 42))}</strong>
-              <span>${item.width}x${item.height} | seed ${item.seed}</span>
+              <span>${item.width}×${item.height} · seed ${item.seed}</span>
             </div>
           </button>
           <div class="thumb-actions">
@@ -514,7 +557,7 @@ function renderHistory(items) {
             <img src="${item.url}" alt="History item" loading="lazy" />
             <div class="history-copy">
               <strong>${escapeHtml(truncate(item.prompt, 42))}</strong>
-              <span>${item.width}x${item.height} | seed ${item.seed}</span>
+              <span>${item.width}×${item.height} · seed ${item.seed}</span>
             </div>
           </button>
           <div class="history-actions">
@@ -804,6 +847,23 @@ async function loadConfig() {
   renderStatus(state.config.status);
 }
 
+/* ─── Collapsible panels ─── */
+function initPanels() {
+  document.querySelectorAll(".panel[data-panel]").forEach((panel) => {
+    // Open prompt and source by default, collapse the rest
+    const name = panel.dataset.panel;
+    if (name === "prompt" || name === "source" || name === "canvas") {
+      panel.classList.add("open");
+    }
+
+    const toggle = panel.querySelector(".panel-toggle");
+    if (!toggle) return;
+    toggle.addEventListener("click", () => {
+      panel.classList.toggle("open");
+    });
+  });
+}
+
 function bindEvents() {
   DOM.width.addEventListener("input", updateResolutionMeta);
   DOM.height.addEventListener("input", updateResolutionMeta);
@@ -814,10 +874,13 @@ function bindEvents() {
   DOM.clearSourceBtn.addEventListener("click", () => setSourceImage(null));
   DOM.initPipelineBtn.addEventListener("click", handleInitPipeline);
   DOM.loraAddBtn.addEventListener("click", handleAddLora);
+
+  // Hidden range kept in sync via drag — but also listen for direct changes
   DOM.compareSlider.addEventListener("input", () => {
     state.comparePosition = Number(DOM.compareSlider.value);
     updateCompareSurface();
   });
+
   DOM.fullscreenStageBtn.addEventListener("click", async () => {
     try {
       if (document.fullscreenElement === DOM.stagePanel) {
@@ -830,10 +893,12 @@ function bindEvents() {
       updateBanner(`Could not toggle fullscreen: ${error.message}`, "error");
     }
   });
+
   DOM.useActiveAsSourceBtn.addEventListener("click", () => {
     if (!state.activeResult) return;
     useItemAsSource(state.activeResult, "Generated source");
   });
+
   DOM.loraStrengthInput.addEventListener("input", () => {
     DOM.loraStrengthValue.textContent = Number(DOM.loraStrengthInput.value).toFixed(2);
   });
@@ -844,9 +909,13 @@ function bindEvents() {
     }
   });
   document.addEventListener("fullscreenchange", renderStage);
+
+  // Bind interactive on-image compare drag
+  bindCompareDrag();
 }
 
 async function init() {
+  initPanels();
   bindEvents();
   clearResults();
   renderSourceCard();
