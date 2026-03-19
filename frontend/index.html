@@ -216,7 +216,15 @@
             <h2 id="stage-title" class="stage-title">Canvas</h2>
             <div id="canvas-meta" class="canvas-meta"></div>
             <div class="stage-actions">
+              <!-- Compare toggle button -->
+              <button id="toggle-compare-btn" class="btn btn-sm btn-surface hidden" type="button">
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M8 1v14M2 4h4M10 4h4M2 8h4M10 8h4M2 12h4M10 12h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+                <span class="btn-label">Compare</span>
+              </button>
               <span id="compare-mode-badge" class="chip chip-accent hidden">Compare</span>
+              <button id="zoom-reset-btn" class="btn btn-sm btn-ghost hidden" type="button">
+                <span class="btn-label">Reset zoom</span>
+              </button>
               <button id="fullscreen-stage-btn" class="btn btn-sm btn-surface hidden" type="button">
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
                 Fullscreen
@@ -234,7 +242,7 @@
             </div>
           </div>
 
-          <!-- Single image view -->
+          <!-- Single image view (full canvas) -->
           <div id="single-stage" class="single-stage hidden">
             <img id="single-stage-image" alt="Stage preview" />
             <div class="stage-label-row">
@@ -242,12 +250,14 @@
             </div>
           </div>
 
-          <!-- Compare view (slider ON the image) -->
+          <!-- Compare view (slider ON the image, zoomable) -->
           <div id="compare-stage" class="compare-stage hidden">
             <div id="compare-surface" class="compare-surface">
-              <img id="compare-before-image" class="compare-image base" alt="Source image" />
-              <div id="compare-after-shell" class="compare-after-shell">
-                <img id="compare-after-image" class="compare-image overlay" alt="Generated image" />
+              <div id="compare-zoom-container" class="compare-zoom-container">
+                <img id="compare-before-image" class="compare-image base" alt="Source image" />
+                <div id="compare-after-shell" class="compare-after-shell">
+                  <img id="compare-after-image" class="compare-image overlay" alt="Generated image" />
+                </div>
               </div>
               <div id="compare-divider" class="compare-divider">
                 <div class="divider-handle">
@@ -256,27 +266,34 @@
               </div>
               <div class="compare-label before">Source</div>
               <div class="compare-label after">Generated</div>
+              <div id="zoom-indicator" class="zoom-indicator hidden">100%</div>
             </div>
             <!-- Hidden range input kept for JS compatibility -->
             <input id="compare-slider" type="range" min="0" max="100" value="50" class="sr-only" />
           </div>
         </section>
 
-        <!-- Results dock -->
-        <section class="dock-panel">
-          <div class="dock-section">
-            <div class="dock-header">
-              <span class="section-label">Current batch</span>
-              <span id="result-count" class="chip">0 images</span>
+        <!-- Results dock — collapsible bottom tray -->
+        <section id="dock-panel" class="dock-panel">
+          <button id="dock-toggle" class="dock-toggle" type="button">
+            <svg class="dock-chevron" width="12" height="12" viewBox="0 0 12 12"><path d="M2 4l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+            <span class="section-label">Results &amp; History</span>
+            <span id="result-count" class="chip">0 images</span>
+          </button>
+          <div class="dock-body">
+            <div class="dock-section">
+              <div class="dock-header">
+                <span class="section-label">Current batch</span>
+              </div>
+              <div id="result-strip" class="thumb-grid"></div>
             </div>
-            <div id="result-strip" class="thumb-grid"></div>
-          </div>
-          <div class="dock-section">
-            <div class="dock-header">
-              <span class="section-label">History</span>
-            </div>
-            <div id="history-list" class="history-grid">
-              <span class="empty-copy">No images saved yet.</span>
+            <div class="dock-section">
+              <div class="dock-header">
+                <span class="section-label">History</span>
+              </div>
+              <div id="history-list" class="history-grid">
+                <span class="empty-copy">No images saved yet.</span>
+              </div>
             </div>
           </div>
         </section>

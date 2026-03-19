@@ -44,13 +44,19 @@ const DOM = {
   compareDivider: $("#compare-divider"),
   compareSlider: $("#compare-slider"),
   compareSurface: $("#compare-surface"),
+  compareZoomContainer: $("#compare-zoom-container"),
   compareModeBadge: $("#compare-mode-badge"),
+  toggleCompareBtn: $("#toggle-compare-btn"),
+  zoomResetBtn: $("#zoom-reset-btn"),
+  zoomIndicator: $("#zoom-indicator"),
   fullscreenStageBtn: $("#fullscreen-stage-btn"),
   useActiveAsSourceBtn: $("#use-active-as-source-btn"),
   resultStrip: $("#result-strip"),
   resultCount: $("#result-count"),
   historyList: $("#history-list"),
   stagePanel: $(".stage-panel"),
+  dockPanel: $("#dock-panel"),
+  dockToggle: $("#dock-toggle"),
 };
 
 const state = {
@@ -64,6 +70,16 @@ const state = {
   isGenerating: false,
   comparePosition: 50,
   isDraggingCompare: false,
+  compareEnabled: true,        // user can toggle compare on/off
+  // Zoom/pan state for compare
+  zoom: 1,
+  panX: 0,
+  panY: 0,
+  isPanning: false,
+  panStartX: 0,
+  panStartY: 0,
+  panOriginX: 0,
+  panOriginY: 0,
 };
 
 async function apiFetch(path, options = {}) {
@@ -365,7 +381,6 @@ function updateCompareSurface() {
   const position = `${state.comparePosition}%`;
   DOM.compareStage.style.setProperty("--compare-position", position);
   DOM.compareDivider.style.left = position;
-  // keep the hidden range in sync (for any external reads)
   DOM.compareSlider.value = state.comparePosition;
 }
 
@@ -374,10 +389,38 @@ function getComparePositionFromEvent(event) {
   const rect = DOM.compareSurface.getBoundingClientRect();
   const clientX = event.touches ? event.touches[0].clientX : event.clientX;
   const x = clientX - rect.left;
+  // Adjust for zoom/pan
   return Math.max(0, Math.min(100, (x / rect.width) * 100));
 }
 
 function onComparePointerDown(event) {
+  // If zoomed, check if we're near the divider — otherwise start panning
+  if (state.zoom > 1) {
+    const rect = DOM.compareSurface.getBoundingClientRect();
+    const clientX = event.touches ? event.touches[0].clientX : event.clientX;
+    const dividerX = rect.left + (state.comparePosition / 100) * rect.width;
+    const threshold = 20;
+
+    if (Math.abs(clientX - dividerX) <= threshold) {
+      // Near divider — drag the slider
+      event.preventDefault();
+      state.isDraggingCompare = true;
+      DOM.compareSurface.classList.add("dragging-slider");
+      state.comparePosition = getComparePositionFromEvent(event);
+      updateCompareSurface();
+    } else {
+      // Far from divider — start panning
+      event.preventDefault();
+      state.isPanning = true;
+      state.panStartX = event.touches ? event.touches[0].clientX : event.clientX;
+      state.panStartY = event.touches ? event.touches[0].clientY : event.clientY;
+      state.panOriginX = state.panX;
+      state.panOriginY = state.panY;
+    }
+    return;
+  }
+
+  // Normal: just drag the compare slider
   event.preventDefault();
   state.isDraggingCompare = true;
   state.comparePosition = getComparePositionFromEvent(event);
@@ -385,14 +428,76 @@ function onComparePointerDown(event) {
 }
 
 function onComparePointerMove(event) {
-  if (!state.isDraggingCompare) return;
-  event.preventDefault();
-  state.comparePosition = getComparePositionFromEvent(event);
-  updateCompareSurface();
+  if (state.isDraggingCompare) {
+    event.preventDefault();
+    state.comparePosition = getComparePositionFromEvent(event);
+    updateCompareSurface();
+    return;
+  }
+
+  if (state.isPanning) {
+    event.preventDefault();
+    const clientX = event.touches ? event.touches[0].clientX : event.clientX;
+    const clientY = event.touches ? event.touches[0].clientY : event.clientY;
+    state.panX = state.panOriginX + (clientX - state.panStartX);
+    state.panY = state.panOriginY + (clientY - state.panStartY);
+    applyZoomTransform();
+  }
 }
 
 function onComparePointerUp() {
   state.isDraggingCompare = false;
+  state.isPanning = false;
+  DOM.compareSurface.classList.remove("dragging-slider");
+}
+
+/* ================================================================
+   Zoom / Pan for compare mode
+   ================================================================ */
+function applyZoomTransform() {
+  if (!DOM.compareZoomContainer) return;
+  DOM.compareZoomContainer.style.transform =
+    `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+
+  // Update zoom indicator
+  if (DOM.zoomIndicator) {
+    const pct = Math.round(state.zoom * 100);
+    DOM.zoomIndicator.textContent = `${pct}%`;
+    DOM.zoomIndicator.classList.toggle("hidden", state.zoom <= 1);
+  }
+
+  // Update zoom class for cursor
+  DOM.compareSurface.classList.toggle("zoomed", state.zoom > 1);
+  DOM.zoomResetBtn.classList.toggle("hidden", state.zoom <= 1);
+}
+
+function resetZoom() {
+  state.zoom = 1;
+  state.panX = 0;
+  state.panY = 0;
+  applyZoomTransform();
+}
+
+function onCompareWheel(event) {
+  event.preventDefault();
+  const delta = event.deltaY > 0 ? -0.1 : 0.1;
+  const newZoom = Math.max(1, Math.min(10, state.zoom + delta * state.zoom));
+
+  if (newZoom === 1) {
+    resetZoom();
+    return;
+  }
+
+  // Zoom towards cursor position
+  const rect = DOM.compareSurface.getBoundingClientRect();
+  const mouseX = event.clientX - rect.left;
+  const mouseY = event.clientY - rect.top;
+
+  const scale = newZoom / state.zoom;
+  state.panX = mouseX - scale * (mouseX - state.panX);
+  state.panY = mouseY - scale * (mouseY - state.panY);
+  state.zoom = newZoom;
+  applyZoomTransform();
 }
 
 function bindCompareDrag() {
@@ -403,6 +508,9 @@ function bindCompareDrag() {
   document.addEventListener("touchmove", onComparePointerMove, { passive: false });
   document.addEventListener("mouseup", onComparePointerUp);
   document.addEventListener("touchend", onComparePointerUp);
+
+  // Wheel zoom
+  DOM.compareSurface.addEventListener("wheel", onCompareWheel, { passive: false });
 }
 
 function renderCanvasMeta() {
@@ -425,19 +533,29 @@ function renderStage() {
   const source = state.sourceImage;
   const active = state.activeResult;
   const canCompare = Boolean(source && active && source.url !== active.url);
+  const showCompare = canCompare && state.compareEnabled;
 
   DOM.stagePlaceholder.classList.toggle("hidden", Boolean(source || active));
-  DOM.singleStage.classList.toggle("hidden", canCompare || !(source || active));
-  DOM.compareStage.classList.toggle("hidden", !canCompare);
-  DOM.compareModeBadge.classList.toggle("hidden", !canCompare);
-  DOM.fullscreenStageBtn.classList.toggle("hidden", !canCompare);
-  DOM.fullscreenStageBtn.querySelector(".btn-label")?.textContent;
+  DOM.singleStage.classList.toggle("hidden", showCompare || !(source || active));
+  DOM.compareStage.classList.toggle("hidden", !showCompare);
+  DOM.compareModeBadge.classList.toggle("hidden", !showCompare);
+  DOM.fullscreenStageBtn.classList.toggle("hidden", !showCompare);
   DOM.useActiveAsSourceBtn.classList.toggle("hidden", !active || (source && source.url === active.url));
 
+  // Show compare toggle when both source and active exist with different URLs
+  DOM.toggleCompareBtn.classList.toggle("hidden", !canCompare);
   if (canCompare) {
+    const btnLabel = DOM.toggleCompareBtn.querySelector(".btn-label");
+    if (btnLabel) {
+      btnLabel.textContent = state.compareEnabled ? "Single view" : "Compare";
+    }
+  }
+
+  if (showCompare) {
     DOM.stageTitle.textContent = "Before / After";
     DOM.compareBeforeImage.src = `${source.url}?t=${Date.now()}`;
     DOM.compareAfterImage.src = `${active.url}?t=${Date.now()}`;
+    resetZoom();
     updateCompareSurface();
     return;
   }
@@ -780,6 +898,10 @@ async function handleGenerate() {
     renderResultStrip(state.results);
     renderStage();
     await loadHistory();
+    // Auto-open dock when new results arrive
+    if (state.results.length > 0) {
+      DOM.dockPanel.classList.add("open");
+    }
   } catch (error) {
     updateBanner(`Generation failed: ${error.message}`, "error");
   } finally {
@@ -850,7 +972,6 @@ async function loadConfig() {
 /* ─── Collapsible panels ─── */
 function initPanels() {
   document.querySelectorAll(".panel[data-panel]").forEach((panel) => {
-    // Open prompt and source by default, collapse the rest
     const name = panel.dataset.panel;
     if (name === "prompt" || name === "source" || name === "canvas") {
       panel.classList.add("open");
@@ -864,6 +985,15 @@ function initPanels() {
   });
 }
 
+/* ─── Dock toggle ─── */
+function initDock() {
+  if (DOM.dockToggle) {
+    DOM.dockToggle.addEventListener("click", () => {
+      DOM.dockPanel.classList.toggle("open");
+    });
+  }
+}
+
 function bindEvents() {
   DOM.width.addEventListener("input", updateResolutionMeta);
   DOM.height.addEventListener("input", updateResolutionMeta);
@@ -875,10 +1005,21 @@ function bindEvents() {
   DOM.initPipelineBtn.addEventListener("click", handleInitPipeline);
   DOM.loraAddBtn.addEventListener("click", handleAddLora);
 
-  // Hidden range kept in sync via drag — but also listen for direct changes
+  // Hidden range kept in sync via drag
   DOM.compareSlider.addEventListener("input", () => {
     state.comparePosition = Number(DOM.compareSlider.value);
     updateCompareSurface();
+  });
+
+  // Compare toggle button
+  DOM.toggleCompareBtn.addEventListener("click", () => {
+    state.compareEnabled = !state.compareEnabled;
+    renderStage();
+  });
+
+  // Zoom reset
+  DOM.zoomResetBtn.addEventListener("click", () => {
+    resetZoom();
   });
 
   DOM.fullscreenStageBtn.addEventListener("click", async () => {
@@ -910,12 +1051,13 @@ function bindEvents() {
   });
   document.addEventListener("fullscreenchange", renderStage);
 
-  // Bind interactive on-image compare drag
+  // Bind interactive on-image compare drag + zoom
   bindCompareDrag();
 }
 
 async function init() {
   initPanels();
+  initDock();
   bindEvents();
   clearResults();
   renderSourceCard();
