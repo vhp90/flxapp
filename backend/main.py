@@ -54,14 +54,24 @@ async def lifespan(app: FastAPI):
     global manager
     transformer_path = os.getenv("TRANSFORMER_PATH", "./models/transformer.safetensors")
     text_encoder_id = os.getenv("TEXT_ENCODER_ID", "huihui-ai/Huihui-Qwen3-8B-abliterated-v2")
+    flux2_repo_id = os.getenv("FLUX2_REPO_ID", "black-forest-labs/FLUX.2-klein-4B")
+    civitai_model_version_id = os.getenv("CIVITAI_MODEL_VERSION_ID", "2746781")
     hf_token = os.getenv("HF_TOKEN")
+    civitai_token = os.getenv("CIVITAI_TOKEN")
 
     manager = PipelineManager(
         transformer_path=transformer_path,
         text_encoder_id=text_encoder_id,
+        flux2_repo_id=flux2_repo_id,
+        civitai_model_version_id=civitai_model_version_id,
         hf_token=hf_token,
+        civitai_token=civitai_token,
     )
-    logger.info("Loading pipeline on startup...")
+
+    logger.info("Checking / downloading models...")
+    manager.download_models()
+
+    logger.info("Loading pipeline onto GPU...")
     manager.load()
     logger.info("Pipeline ready.")
     yield
