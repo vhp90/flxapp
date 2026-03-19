@@ -1,493 +1,868 @@
-/* ================================================================
-   Flux2 GUI – Application Logic
-   ================================================================ */
-
-const API = '';
-
-// ---------------------------------------------------------------------------
-// DOM References
-// ---------------------------------------------------------------------------
-const $ = (sel) => document.querySelector(sel);
-const $$ = (sel) => document.querySelectorAll(sel);
+const $ = (selector) => document.querySelector(selector);
 
 const DOM = {
-  status: $('#pipeline-status'),
-  prompt: $('#prompt-input'),
-  negPrompt: $('#negative-prompt-input'),
-  presetSelect: $('#preset-select'),
-  width: $('#width-input'),
-  height: $('#height-input'),
-  megapixelDisplay: $('#megapixel-display'),
-  aspectDisplay: $('#aspect-display'),
-  outputWidth: $('#output-width'),
-  outputHeight: $('#output-height'),
-  outputMp: $('#output-mp'),
-  imageUpload: $('#image-upload'),
-  stepsSlider: $('#steps-slider'),
-  stepsValue: $('#steps-value'),
-  guidanceSlider: $('#guidance-slider'),
-  guidanceValue: $('#guidance-value'),
-  seed: $('#seed-input'),
-  numImages: $('#num-images-input'),
-  generateBtn: $('#generate-btn'),
-  generateSpinner: $('#generate-spinner'),
-  previewImg: $('#preview-image'),
-  previewPlaceholder: $('#preview-placeholder'),
-  previewMeta: $('#preview-meta'),
-  metaResolution: $('#meta-resolution'),
-  metaSteps: $('#meta-steps'),
-  metaSeed: $('#meta-seed'),
-  loraList: $('#lora-list'),
-  loraNameInput: $('#lora-name-input'),
-  loraPathInput: $('#lora-path-input'),
-  loraStrengthInput: $('#lora-strength-input'),
-  loraStrengthValue: $('#lora-strength-value'),
-  loraAddBtn: $('#lora-add-btn'),
-  availableLorasList: $('#available-loras-list'),
-  historyList: $('#history-list'),
+  status: $("#pipeline-status"),
+  statusBanner: $("#status-banner"),
+  initPipelineBtn: $("#init-pipeline-btn"),
+  prompt: $("#prompt-input"),
+  negativePrompt: $("#negative-prompt-input"),
+  generateBtn: $("#generate-btn"),
+  generateSpinner: $("#generate-spinner"),
+  clearResultsBtn: $("#clear-results-btn"),
+  imageUpload: $("#image-upload"),
+  clearSourceBtn: $("#clear-source-btn"),
+  width: $("#width-input"),
+  height: $("#height-input"),
+  megapixelDisplay: $("#megapixel-display"),
+  aspectDisplay: $("#aspect-display"),
+  presetSelect: $("#preset-select"),
+  outputWidth: $("#output-width"),
+  outputHeight: $("#output-height"),
+  outputMp: $("#output-mp"),
+  samplingControls: $("#sampling-controls"),
+  loraList: $("#lora-list"),
+  loraNameInput: $("#lora-name-input"),
+  loraPathInput: $("#lora-path-input"),
+  loraStrengthInput: $("#lora-strength-input"),
+  loraStrengthValue: $("#lora-strength-value"),
+  loraAddBtn: $("#lora-add-btn"),
+  availableLorasList: $("#available-loras-list"),
+  runtimeFacts: $("#runtime-facts"),
+  sourceCard: $("#source-card"),
+  sourceTitle: $("#source-title"),
+  sourceDescription: $("#source-description"),
+  stageTitle: $("#stage-title"),
+  canvasMeta: $("#canvas-meta"),
+  stagePlaceholder: $("#stage-placeholder"),
+  singleStage: $("#single-stage"),
+  singleStageImage: $("#single-stage-image"),
+  singleStageLabel: $("#single-stage-label"),
+  compareStage: $("#compare-stage"),
+  compareBeforeImage: $("#compare-before-image"),
+  compareAfterImage: $("#compare-after-image"),
+  compareAfterShell: $("#compare-after-shell"),
+  compareDivider: $("#compare-divider"),
+  compareSlider: $("#compare-slider"),
+  compareModeBadge: $("#compare-mode-badge"),
+  fullscreenStageBtn: $("#fullscreen-stage-btn"),
+  useActiveAsSourceBtn: $("#use-active-as-source-btn"),
+  resultStrip: $("#result-strip"),
+  resultCount: $("#result-count"),
+  historyList: $("#history-list"),
+  stagePanel: $(".stage-panel"),
 };
 
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-let isGenerating = false;
-let presets = [];
+const state = {
+  config: null,
+  status: null,
+  history: [],
+  results: [],
+  controlInputs: {},
+  sourceImage: null,
+  activeResult: null,
+  isGenerating: false,
+  comparePosition: 50,
+};
 
-// ---------------------------------------------------------------------------
-// Utility – API calls
-// ---------------------------------------------------------------------------
 async function apiFetch(path, options = {}) {
-  const res = await fetch(`${API}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
-    ...options,
-  });
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || 'API error');
+  const headers = new Headers(options.headers || {});
+  if (options.body && !(options.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
-  return res.json();
+
+  const response = await fetch(path, { ...options, headers });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }));
+    throw new Error(error.detail || "Request failed.");
+  }
+  return response.json();
 }
 
-// ---------------------------------------------------------------------------
-// Pipeline Status
-// ---------------------------------------------------------------------------
-async function checkStatus() {
-  try {
-    const data = await apiFetch('/api/status');
-    DOM.status.textContent = data.ready ? 'Online' : 'Loading…';
-    DOM.status.className = `status-badge ${data.ready ? 'online' : 'offline'}`;
-    if (data.ready) {
-      renderLoraList(data.loras);
-    }
-  } catch {
-    DOM.status.textContent = 'Offline';
-    DOM.status.className = 'status-badge offline';
+function escapeHtml(value) {
+  const div = document.createElement("div");
+  div.textContent = value;
+  return div.innerHTML;
+}
+
+function escapeAttr(value) {
+  return String(value).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function truncate(value, maxLength) {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+}
+
+function gcd(a, b) {
+  return b === 0 ? a : gcd(b, a % b);
+}
+
+function formatCount(count, noun) {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+function updateBanner(message, tone = "") {
+  if (!message) {
+    DOM.statusBanner.textContent = "";
+    DOM.statusBanner.className = "status-banner hidden";
+    return;
+  }
+
+  DOM.statusBanner.textContent = message;
+  DOM.statusBanner.className = `status-banner ${tone}`.trim();
+}
+
+function renderStatus(status) {
+  state.status = status;
+
+  let label = "Runtime idle";
+  let tone = "offline";
+  if (status.ready) {
+    label = "Pipeline ready";
+    tone = "online";
+  } else if (status.state === "loading") {
+    label = "Initializing";
+    tone = "offline";
+  } else if (status.state === "error") {
+    label = "Needs attention";
+    tone = "error";
+  }
+
+  DOM.status.textContent = label;
+  DOM.status.className = `status-pill ${tone}`;
+
+  const settings = status.settings || {};
+  const extraFlags = [];
+  if (settings.mock_generation) extraFlags.push("mock generation enabled");
+  if (!settings.allow_downloads) extraFlags.push("local files only");
+
+  if (status.state === "error") {
+    updateBanner(`${status.message}${status.error ? ` ${status.error}` : ""}`, "error");
+  } else if (!status.ready) {
+    updateBanner(
+      `${status.message || "Pipeline is not ready yet."}${extraFlags.length ? ` (${extraFlags.join(", ")})` : ""}`,
+      "warning",
+    );
+  } else {
+    updateBanner(`Runtime ready${extraFlags.length ? ` (${extraFlags.join(", ")})` : ""}.`);
+  }
+
+  DOM.initPipelineBtn.classList.toggle("hidden", status.ready);
+  syncGenerateButton();
+  renderRuntimeFacts();
+}
+
+function renderRuntimeFacts() {
+  if (!state.config || !state.status) return;
+
+  const model = state.config.model || {};
+  const resources = state.status.resources || {};
+  const settings = state.status.settings || {};
+  const facts = [
+    ["Transformer file", model.transformer_path || "Not configured"],
+    ["Transformer present", resources.transformer_exists ? "Yes" : "No"],
+    ["Text encoder", model.text_encoder_id || "Not configured"],
+    ["Flux2 repo", model.flux2_repo_id || "Not configured"],
+    ["CivitAI version", model.civitai_model_version_id || "Not configured"],
+    ["Downloads allowed", settings.allow_downloads ? "Yes" : "No"],
+    ["Mock generation", settings.mock_generation ? "Yes" : "No"],
+  ];
+
+  DOM.runtimeFacts.innerHTML = facts
+    .map(
+      ([label, value]) => `
+        <div>
+          <dt>${escapeHtml(label)}</dt>
+          <dd>${escapeHtml(String(value))}</dd>
+        </div>
+      `,
+    )
+    .join("");
+}
+
+function buildControl(control) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "control-card";
+
+  const valueMarkup = control.type === "range"
+    ? `<span class="slider-value" data-value-for="${control.key}"></span>`
+    : "";
+
+  wrapper.innerHTML = `
+    <div class="control-topline">
+      <strong>${escapeHtml(control.label)}</strong>
+      ${valueMarkup}
+    </div>
+    <input
+      id="control-${control.key}"
+      type="${control.type === "range" ? "range" : control.type}"
+      ${control.min !== undefined ? `min="${control.min}"` : ""}
+      ${control.max !== undefined ? `max="${control.max}"` : ""}
+      ${control.step !== undefined ? `step="${control.step}"` : ""}
+      ${control.placeholder ? `placeholder="${escapeAttr(control.placeholder)}"` : ""}
+      value="${escapeAttr(String(control.default ?? ""))}"
+    />
+  `;
+
+  const input = wrapper.querySelector("input");
+  state.controlInputs[control.key] = input;
+
+  if (control.type === "range") {
+    const valueNode = wrapper.querySelector(`[data-value-for="${control.key}"]`);
+    const updateValue = () => {
+      valueNode.textContent = Number(input.value).toFixed(control.step < 1 ? 1 : 0);
+    };
+    updateValue();
+    input.addEventListener("input", updateValue);
+  }
+
+  return wrapper;
+}
+
+function renderControls() {
+  state.controlInputs = {};
+  DOM.samplingControls.innerHTML = "";
+
+  for (const control of state.config?.controls || []) {
+    DOM.samplingControls.appendChild(buildControl(control));
   }
 }
 
-// ---------------------------------------------------------------------------
-// Slider sync (real-time value display)
-// ---------------------------------------------------------------------------
-function syncSliders() {
-  DOM.stepsSlider.addEventListener('input', () => {
-    DOM.stepsValue.textContent = DOM.stepsSlider.value;
-  });
-  DOM.guidanceSlider.addEventListener('input', () => {
-    DOM.guidanceValue.textContent = parseFloat(DOM.guidanceSlider.value).toFixed(1);
-  });
-  DOM.loraStrengthInput.addEventListener('input', () => {
-    DOM.loraStrengthValue.textContent = parseFloat(DOM.loraStrengthInput.value).toFixed(2);
-  });
+function renderPresets() {
+  DOM.presetSelect.innerHTML = '<option value="native">Native dimensions</option>';
+  for (const preset of state.config?.presets || []) {
+    const option = document.createElement("option");
+    option.value = String(preset.megapixels);
+    option.textContent = `${preset.name} target`;
+    DOM.presetSelect.appendChild(option);
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Resolution helpers
-// ---------------------------------------------------------------------------
-function gcd(a, b) { return b === 0 ? a : gcd(b, a % b); }
+function applyConfigDefaults() {
+  const dimensions = state.config?.dimensions;
+  if (!dimensions) return;
 
-/** Round to nearest multiple of 64, clamped between 256 and 4096 */
-function roundTo64(v) {
-  return Math.max(256, Math.min(4096, Math.round(v / 64) * 64));
+  DOM.width.value = dimensions.width.default;
+  DOM.height.value = dimensions.height.default;
+  DOM.width.min = dimensions.width.min;
+  DOM.width.max = dimensions.width.max;
+  DOM.width.step = dimensions.width.step;
+  DOM.height.min = dimensions.height.min;
+  DOM.height.max = dimensions.height.max;
+  DOM.height.step = dimensions.height.step;
+  DOM.presetSelect.value = "native";
+
+  updateResolutionMeta();
 }
 
-/** Calculate output width/height by scaling base aspect ratio to target megapixels */
-function calcOutputDims(baseW, baseH, targetMP) {
-  const aspect = baseW / baseH;
-  // targetMP * 1e6 = outW * outH, and outW/outH = aspect
-  // outH = sqrt(targetMP*1e6 / aspect),  outW = outH * aspect
-  const outH = Math.sqrt((targetMP * 1_000_000) / aspect);
-  const outW = outH * aspect;
-  return { w: roundTo64(outW), h: roundTo64(outH) };
+function calcOutputDims(baseWidth, baseHeight, targetMP) {
+  const step = Number(state.config?.dimensions?.width?.step || 64);
+  const min = Number(state.config?.dimensions?.width?.min || 256);
+  const max = Number(state.config?.dimensions?.width?.max || 4096);
+  const aspect = baseWidth / baseHeight;
+  const rawHeight = Math.sqrt((targetMP * 1000000) / aspect);
+  const rawWidth = rawHeight * aspect;
+  const normalize = (value) => Math.max(min, Math.min(max, Math.round(value / step) * step));
+  return { width: normalize(rawWidth), height: normalize(rawHeight) };
+}
+
+function getOutputDims() {
+  const baseWidth = Number(DOM.width.value || 1024);
+  const baseHeight = Number(DOM.height.value || 1024);
+  if (DOM.presetSelect.value === "native") {
+    return { width: baseWidth, height: baseHeight };
+  }
+  return calcOutputDims(baseWidth, baseHeight, Number(DOM.presetSelect.value));
 }
 
 function updateResolutionMeta() {
-  const w = parseInt(DOM.width.value, 10) || 1024;
-  const h = parseInt(DOM.height.value, 10) || 1024;
-  const mp = (w * h) / 1_000_000;
+  const width = Number(DOM.width.value || 1024);
+  const height = Number(DOM.height.value || 1024);
+  const ratio = gcd(width, height);
+  const mp = (width * height) / 1000000;
+  const output = getOutputDims();
+
   DOM.megapixelDisplay.textContent = `${mp.toFixed(2)} MP`;
-  const g = gcd(w, h);
-  DOM.aspectDisplay.textContent = `${w / g}:${h / g}`;
-
-  // Recalculate output dims
-  updateOutputDims();
+  DOM.aspectDisplay.textContent = `${width / ratio}:${height / ratio}`;
+  DOM.outputWidth.textContent = output.width;
+  DOM.outputHeight.textContent = output.height;
+  DOM.outputMp.textContent = `${((output.width * output.height) / 1000000).toFixed(2)} MP`;
 }
 
-function updateOutputDims() {
-  const baseW = parseInt(DOM.width.value, 10) || 1024;
-  const baseH = parseInt(DOM.height.value, 10) || 1024;
-  const selected = DOM.presetSelect.value;
+function readControlValue(key) {
+  return state.controlInputs[key]?.value ?? "";
+}
 
-  let outW, outH;
-  if (selected === 'native') {
-    outW = baseW;
-    outH = baseH;
-  } else {
-    const targetMP = parseFloat(selected);
-    const dims = calcOutputDims(baseW, baseH, targetMP);
-    outW = dims.w;
-    outH = dims.h;
+function generationPayload() {
+  const output = getOutputDims();
+  return {
+    prompt: DOM.prompt.value.trim(),
+    negative_prompt: DOM.negativePrompt.value.trim(),
+    input_image_url: state.sourceImage?.url || null,
+    width: output.width,
+    height: output.height,
+    num_inference_steps: Number(readControlValue("num_inference_steps")),
+    guidance_scale: Number(readControlValue("guidance_scale")),
+    seed: Number(readControlValue("seed")),
+    num_images: Number(readControlValue("num_images")),
+  };
+}
+
+function syncGenerateButton() {
+  DOM.generateBtn.disabled = state.isGenerating || !((state.status?.ready || state.status?.settings?.mock_generation) ?? false);
+}
+
+function setGenerating(isGenerating) {
+  state.isGenerating = isGenerating;
+  DOM.generateSpinner.classList.toggle("hidden", !isGenerating);
+  DOM.generateBtn.querySelector(".btn-label").textContent = isGenerating ? "Generating" : "Generate";
+  syncGenerateButton();
+}
+
+function setSourceImage(image) {
+  state.sourceImage = image;
+  renderSourceCard();
+  renderStage();
+}
+
+function renderSourceCard() {
+  if (!state.sourceImage) {
+    DOM.sourceCard.className = "source-card empty";
+    DOM.sourceCard.innerHTML = `
+      <div class="source-preview empty-state">
+        <p>No source image yet</p>
+        <span>Upload one to anchor dimensions and image-guided generation.</span>
+      </div>
+      <div class="source-copy">
+        <strong id="source-title">No source selected</strong>
+        <span id="source-description">The stage will show your upload here first.</span>
+      </div>
+    `;
+    return;
   }
 
-  DOM.outputWidth.textContent = outW;
-  DOM.outputHeight.textContent = outH;
-  const outMP = (outW * outH) / 1_000_000;
-  DOM.outputMp.textContent = `${outMP.toFixed(2)} MP`;
+  DOM.sourceCard.className = "source-card";
+  DOM.sourceCard.innerHTML = `
+    <div class="source-preview">
+      <img src="${state.sourceImage.url}" alt="Current source image" />
+    </div>
+    <div class="source-copy">
+      <strong>${escapeHtml(state.sourceImage.label)}</strong>
+      <span>${escapeHtml(state.sourceImage.description)}</span>
+      <div class="stage-label-row">
+        <span class="source-tag">${state.sourceImage.width}x${state.sourceImage.height}</span>
+        <span class="source-tag">${escapeHtml(state.sourceImage.kind)}</span>
+      </div>
+    </div>
+  `;
 }
 
-function syncResolutionInputs() {
-  DOM.width.addEventListener('input', updateResolutionMeta);
-  DOM.height.addEventListener('input', updateResolutionMeta);
+function updateCompareSurface() {
+  const position = `${state.comparePosition}%`;
+  DOM.compareStage.style.setProperty("--compare-position", position);
+  DOM.compareDivider.style.left = position;
 }
 
-// ---------------------------------------------------------------------------
-// Quality Presets (MP targets)
-// ---------------------------------------------------------------------------
-async function loadPresets() {
-  try {
-    presets = await apiFetch('/api/presets');
-    presets.forEach((p) => {
-      const opt = document.createElement('option');
-      opt.value = p.megapixels;
-      opt.textContent = `Upscale to ${p.name}`;
-      DOM.presetSelect.appendChild(opt);
-    });
-  } catch {
-    // presets endpoint not available
+function renderCanvasMeta() {
+  const chunks = [];
+  if (state.sourceImage) {
+    chunks.push(`<span>source: ${escapeHtml(state.sourceImage.label)}</span>`);
   }
+  if (state.activeResult) {
+    chunks.push(`<span>${state.activeResult.width}x${state.activeResult.height}</span>`);
+    chunks.push(`<span>${state.activeResult.steps} steps</span>`);
+    chunks.push(`<span>guidance ${Number(state.activeResult.guidance_scale).toFixed(1)}</span>`);
+    chunks.push(`<span>seed ${state.activeResult.seed}</span>`);
+  }
+  DOM.canvasMeta.innerHTML = chunks.join("");
 }
 
-function syncPresetSelect() {
-  DOM.presetSelect.addEventListener('change', updateOutputDims);
+function renderStage() {
+  renderCanvasMeta();
+
+  const source = state.sourceImage;
+  const active = state.activeResult;
+  const canCompare = Boolean(source && active && source.url !== active.url);
+
+  DOM.stagePlaceholder.classList.toggle("hidden", Boolean(source || active));
+  DOM.singleStage.classList.toggle("hidden", canCompare || !(source || active));
+  DOM.compareStage.classList.toggle("hidden", !canCompare);
+  DOM.compareModeBadge.classList.toggle("hidden", !canCompare);
+  DOM.fullscreenStageBtn.classList.toggle("hidden", !canCompare);
+  DOM.fullscreenStageBtn.textContent = document.fullscreenElement === DOM.stagePanel ? "Exit fullscreen" : "Fullscreen compare";
+  DOM.useActiveAsSourceBtn.classList.toggle("hidden", !active || (source && source.url === active.url));
+
+  if (canCompare) {
+    DOM.stageTitle.textContent = "Before / after compare";
+    DOM.compareBeforeImage.src = `${source.url}?t=${Date.now()}`;
+    DOM.compareAfterImage.src = `${active.url}?t=${Date.now()}`;
+    updateCompareSurface();
+    return;
+  }
+
+  if (active) {
+    DOM.stageTitle.textContent = "Generated preview";
+    DOM.singleStageImage.src = `${active.url}?t=${Date.now()}`;
+    DOM.singleStageLabel.textContent = "Generated";
+    return;
+  }
+
+  if (source) {
+    DOM.stageTitle.textContent = "Source preview";
+    DOM.singleStageImage.src = `${source.url}?t=${Date.now()}`;
+    DOM.singleStageLabel.textContent = "Source image";
+    return;
+  }
+
+  DOM.stageTitle.textContent = "Studio canvas";
 }
 
-// ---------------------------------------------------------------------------
-// Image Upload – Auto Dimensions
-// ---------------------------------------------------------------------------
-function syncImageUpload() {
-  DOM.imageUpload.addEventListener('change', async () => {
-    const file = DOM.imageUpload.files[0];
-    if (!file) return;
+function clearResults() {
+  state.results = [];
+  state.activeResult = null;
+  DOM.resultStrip.innerHTML = "";
+  DOM.resultCount.textContent = "0 images";
+  renderStage();
+}
 
-    const formData = new FormData();
-    formData.append('file', file);
-
-    try {
-      const res = await fetch('/api/upload-image', { method: 'POST', body: formData });
-      if (!res.ok) throw new Error('Upload failed');
-      const data = await res.json();
-
-      // Set base dimensions from uploaded image
-      DOM.width.value = data.width;
-      DOM.height.value = data.height;
-      updateResolutionMeta();
-
-      // Show uploaded image in preview
-      showPreview(data.url, {
-        width: data.width,
-        height: data.height,
-        num_inference_steps: '-',
-        seed: '-',
-      });
-    } catch (err) {
-      alert(`Upload failed: ${err.message}`);
-    }
-
-    DOM.imageUpload.value = '';
+function useItemAsSource(item, labelPrefix) {
+  setSourceImage({
+    url: item.url,
+    width: item.width,
+    height: item.height,
+    label: `${labelPrefix}: ${truncate(item.prompt, 34)}`,
+    description: "This image is now the source used for the next generation request.",
+    kind: "generation",
   });
 }
 
-// ---------------------------------------------------------------------------
-// Generation
-// ---------------------------------------------------------------------------
-function getOutputDims() {
-  const baseW = parseInt(DOM.width.value, 10) || 1024;
-  const baseH = parseInt(DOM.height.value, 10) || 1024;
-  const selected = DOM.presetSelect.value;
-
-  if (selected === 'native') {
-    return { w: baseW, h: baseH };
+function renderResultStrip(items) {
+  DOM.resultCount.textContent = formatCount(items.length, "image");
+  if (!items.length) {
+    DOM.resultStrip.innerHTML = "";
+    return;
   }
-  const targetMP = parseFloat(selected);
-  return calcOutputDims(baseW, baseH, targetMP);
-}
 
-async function handleGenerate() {
-  if (isGenerating) return;
-  const prompt = DOM.prompt.value.trim();
-  if (!prompt) { DOM.prompt.focus(); return; }
+  DOM.resultStrip.innerHTML = items
+    .map(
+      (item, index) => `
+        <article class="thumb-card">
+          <button type="button" class="thumb-image-button" data-preview-url="${escapeAttr(item.url)}">
+            <img src="${item.url}" alt="Generated image ${index + 1}" />
+            <div class="thumb-copy">
+              <strong>${escapeHtml(truncate(item.prompt, 42))}</strong>
+              <span>${item.width}x${item.height} | seed ${item.seed}</span>
+            </div>
+          </button>
+          <div class="thumb-actions">
+            <button type="button" class="btn-inline" data-preview-url="${escapeAttr(item.url)}">Preview</button>
+            <button type="button" class="btn-inline" data-source-url="${escapeAttr(item.url)}">Use as source</button>
+          </div>
+        </article>
+      `,
+    )
+    .join("");
 
-  isGenerating = true;
-  DOM.generateBtn.disabled = true;
-  DOM.generateBtn.querySelector('.btn-label').textContent = 'Generating…';
-  DOM.generateSpinner.classList.remove('hidden');
-
-  const dims = getOutputDims();
-
-  try {
-    const payload = {
-      prompt,
-      negative_prompt: DOM.negPrompt.value.trim(),
-      width: dims.w,
-      height: dims.h,
-      num_inference_steps: parseInt(DOM.stepsSlider.value, 10),
-      guidance_scale: parseFloat(DOM.guidanceSlider.value),
-      seed: parseInt(DOM.seed.value, 10),
-      num_images: parseInt(DOM.numImages.value, 10),
-    };
-
-    const data = await apiFetch('/api/generate', {
-      method: 'POST',
-      body: JSON.stringify(payload),
+  DOM.resultStrip.querySelectorAll("[data-preview-url]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = items.find((entry) => entry.url === button.dataset.previewUrl);
+      if (!item) return;
+      state.activeResult = item;
+      renderStage();
     });
+  });
 
-    if (data.images && data.images.length > 0) {
-      showPreview(data.images[0], payload);
-    }
-
-    await loadHistory();
-  } catch (err) {
-    alert(`Generation failed: ${err.message}`);
-  } finally {
-    isGenerating = false;
-    DOM.generateBtn.disabled = false;
-    DOM.generateBtn.querySelector('.btn-label').textContent = 'Generate';
-    DOM.generateSpinner.classList.add('hidden');
-  }
+  DOM.resultStrip.querySelectorAll("[data-source-url]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = items.find((entry) => entry.url === button.dataset.sourceUrl);
+      if (!item) return;
+      useItemAsSource(item, "Generated source");
+    });
+  });
 }
 
-function showPreview(url, params) {
-  DOM.previewPlaceholder.classList.add('hidden');
-  DOM.previewImg.classList.remove('hidden');
-  DOM.previewImg.src = `${url}?t=${Date.now()}`;
-  DOM.previewMeta.classList.remove('hidden');
-  DOM.metaResolution.textContent = `${params.width}×${params.height}`;
-  DOM.metaSteps.textContent = `${params.num_inference_steps} steps`;
-  DOM.metaSeed.textContent = `seed: ${params.seed}`;
-}
-
-// ---------------------------------------------------------------------------
-// History
-// ---------------------------------------------------------------------------
-async function loadHistory() {
-  try {
-    const history = await apiFetch('/api/history');
-    renderHistory(history);
-  } catch {
-    DOM.historyList.innerHTML = '<span class="muted">Failed to load history</span>';
+function applyHistorySettings(item) {
+  DOM.prompt.value = item.prompt || "";
+  DOM.negativePrompt.value = item.negative_prompt || "";
+  DOM.width.value = item.width;
+  DOM.height.value = item.height;
+  DOM.presetSelect.value = "native";
+  if (state.controlInputs.num_inference_steps) {
+    state.controlInputs.num_inference_steps.value = item.steps;
+    state.controlInputs.num_inference_steps.dispatchEvent(new Event("input"));
   }
+  if (state.controlInputs.guidance_scale) {
+    state.controlInputs.guidance_scale.value = item.guidance_scale;
+    state.controlInputs.guidance_scale.dispatchEvent(new Event("input"));
+  }
+  if (state.controlInputs.seed) {
+    state.controlInputs.seed.value = item.seed;
+  }
+  updateResolutionMeta();
 }
 
 function renderHistory(items) {
-  if (!items || items.length === 0) {
-    DOM.historyList.innerHTML = '<span class="muted">No images yet</span>';
+  if (!items.length) {
+    DOM.historyList.innerHTML = '<span class="empty-copy">No images saved yet.</span>';
     return;
   }
 
-  DOM.historyList.innerHTML = items.map((item) => `
-    <div class="history-card" data-id="${item.id}" title="${escapeHtml(item.prompt)}">
-      <img src="${item.url}" alt="Generated" loading="lazy" />
-      <div class="history-overlay">${escapeHtml(truncate(item.prompt, 40))}</div>
-      <button class="history-delete" data-id="${item.id}" title="Delete">✕</button>
-    </div>
-  `).join('');
+  DOM.historyList.innerHTML = items
+    .map(
+      (item) => `
+        <article class="history-card">
+          <button type="button" class="thumb-image-button" data-history-preview="${escapeAttr(item.id)}">
+            <img src="${item.url}" alt="History item" loading="lazy" />
+            <div class="history-copy">
+              <strong>${escapeHtml(truncate(item.prompt, 42))}</strong>
+              <span>${item.width}x${item.height} | seed ${item.seed}</span>
+            </div>
+          </button>
+          <div class="history-actions">
+            <button type="button" class="btn-inline" data-history-source="${escapeAttr(item.id)}">Use as source</button>
+            <button type="button" class="btn-inline" data-history-apply="${escapeAttr(item.id)}">Load settings</button>
+            <button type="button" class="btn-inline danger" data-history-delete="${escapeAttr(item.id)}">Delete</button>
+          </div>
+        </article>
+      `,
+    )
+    .join("");
 
-  DOM.historyList.querySelectorAll('.history-card').forEach((card) => {
-    card.addEventListener('click', (e) => {
-      if (e.target.classList.contains('history-delete')) return;
-      const item = items.find((i) => i.id === card.dataset.id);
-      if (item) {
-        showPreview(item.url, {
-          width: item.width,
-          height: item.height,
-          num_inference_steps: item.steps,
-          seed: item.seed,
-        });
-        DOM.width.value = item.width;
-        DOM.height.value = item.height;
-        DOM.presetSelect.value = 'native';
-        updateResolutionMeta();
-      }
+  DOM.historyList.querySelectorAll("[data-history-preview]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = items.find((entry) => entry.id === button.dataset.historyPreview);
+      if (!item) return;
+      state.activeResult = item;
+      renderStage();
     });
   });
 
-  DOM.historyList.querySelectorAll('.history-delete').forEach((btn) => {
-    btn.addEventListener('click', async (e) => {
-      e.stopPropagation();
+  DOM.historyList.querySelectorAll("[data-history-source]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = items.find((entry) => entry.id === button.dataset.historySource);
+      if (!item) return;
+      useItemAsSource(item, "History source");
+    });
+  });
+
+  DOM.historyList.querySelectorAll("[data-history-apply]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const item = items.find((entry) => entry.id === button.dataset.historyApply);
+      if (!item) return;
+      state.activeResult = item;
+      applyHistorySettings(item);
+      renderStage();
+    });
+  });
+
+  DOM.historyList.querySelectorAll("[data-history-delete]").forEach((button) => {
+    button.addEventListener("click", async () => {
       try {
-        await apiFetch(`/api/history/${btn.dataset.id}`, { method: 'DELETE' });
+        await apiFetch(`/api/history/${button.dataset.historyDelete}`, { method: "DELETE" });
         await loadHistory();
-      } catch (err) {
-        console.error('Delete failed:', err);
+      } catch (error) {
+        updateBanner(`Could not delete history item: ${error.message}`, "error");
       }
     });
   });
 }
 
-// ---------------------------------------------------------------------------
-// LoRA Management
-// ---------------------------------------------------------------------------
+async function loadHistory() {
+  try {
+    state.history = await apiFetch("/api/history");
+    renderHistory(state.history);
+  } catch (error) {
+    updateBanner(`Could not load history: ${error.message}`, "error");
+  }
+}
+
 function renderLoraList(loras) {
-  if (!loras || loras.length === 0) {
-    DOM.loraList.innerHTML = '<span class="muted">No LoRAs loaded</span>';
+  if (!loras.length) {
+    DOM.loraList.innerHTML = '<span class="empty-copy">No LoRAs loaded.</span>';
     return;
   }
 
-  DOM.loraList.innerHTML = loras.map((lora) => `
-    <div class="lora-card ${lora.enabled ? '' : 'disabled'}">
-      <input type="checkbox" class="lora-toggle" data-name="${escapeAttr(lora.name)}" ${lora.enabled ? 'checked' : ''} />
-      <span class="lora-name" title="${escapeAttr(lora.path)}">${escapeHtml(lora.name)}</span>
-      <input type="range" class="lora-strength-slider" data-name="${escapeAttr(lora.name)}" min="0" max="2" step="0.05" value="${lora.strength}" />
-      <span class="lora-strength-val">${lora.strength.toFixed(2)}</span>
-      <button class="btn-danger" data-name="${escapeAttr(lora.name)}" title="Unload">✕</button>
-    </div>
-  `).join('');
+  DOM.loraList.innerHTML = loras
+    .map(
+      (lora) => `
+        <div class="lora-row">
+          <div class="lora-row-top">
+            <div class="lora-title">
+              <strong>${escapeHtml(lora.name)}</strong>
+              <span class="lora-path">${escapeHtml(lora.path)}</span>
+            </div>
+            <div class="card-inline-row">
+              <label class="micro-label">
+                <input type="checkbox" class="lora-toggle" data-name="${escapeAttr(lora.name)}" ${lora.enabled ? "checked" : ""} />
+                enabled
+              </label>
+              <button type="button" class="btn-inline danger" data-unload-name="${escapeAttr(lora.name)}">Unload</button>
+            </div>
+          </div>
+          <div class="slider-shell">
+            <input
+              type="range"
+              class="lora-strength-slider"
+              min="0"
+              max="2"
+              step="0.05"
+              value="${lora.strength}"
+              data-name="${escapeAttr(lora.name)}"
+            />
+            <span class="slider-value">${Number(lora.strength).toFixed(2)}</span>
+          </div>
+        </div>
+      `,
+    )
+    .join("");
 
-  DOM.loraList.querySelectorAll('.lora-toggle').forEach((toggle) => {
-    toggle.addEventListener('change', async () => {
+  DOM.loraList.querySelectorAll(".lora-toggle").forEach((toggle) => {
+    toggle.addEventListener("change", async () => {
       try {
-        const res = await apiFetch('/api/loras/toggle', {
-          method: 'POST',
+        const result = await apiFetch("/api/loras/toggle", {
+          method: "POST",
           body: JSON.stringify({ name: toggle.dataset.name, enabled: toggle.checked }),
         });
-        renderLoraList(res.loras);
-      } catch (err) { alert(`Toggle failed: ${err.message}`); }
+        renderLoraList(result.loras);
+      } catch (error) {
+        updateBanner(`Could not toggle LoRA: ${error.message}`, "error");
+      }
     });
   });
 
-  DOM.loraList.querySelectorAll('.lora-strength-slider').forEach((slider) => {
-    slider.addEventListener('change', async () => {
-      try {
-        const res = await apiFetch('/api/loras/strength', {
-          method: 'POST',
-          body: JSON.stringify({ name: slider.dataset.name, strength: parseFloat(slider.value) }),
-        });
-        renderLoraList(res.loras);
-      } catch (err) { alert(`Strength update failed: ${err.message}`); }
+  DOM.loraList.querySelectorAll(".lora-strength-slider").forEach((slider) => {
+    slider.addEventListener("input", () => {
+      slider.nextElementSibling.textContent = Number(slider.value).toFixed(2);
     });
-    slider.addEventListener('input', () => {
-      slider.nextElementSibling.textContent = parseFloat(slider.value).toFixed(2);
+    slider.addEventListener("change", async () => {
+      try {
+        const result = await apiFetch("/api/loras/strength", {
+          method: "POST",
+          body: JSON.stringify({ name: slider.dataset.name, strength: Number(slider.value) }),
+        });
+        renderLoraList(result.loras);
+      } catch (error) {
+        updateBanner(`Could not update LoRA strength: ${error.message}`, "error");
+      }
     });
   });
 
-  DOM.loraList.querySelectorAll('.btn-danger').forEach((btn) => {
-    btn.addEventListener('click', async () => {
+  DOM.loraList.querySelectorAll("[data-unload-name]").forEach((button) => {
+    button.addEventListener("click", async () => {
       try {
-        const res = await apiFetch('/api/loras/unload', {
-          method: 'POST',
-          body: JSON.stringify({ name: btn.dataset.name }),
+        const result = await apiFetch("/api/loras/unload", {
+          method: "POST",
+          body: JSON.stringify({ name: button.dataset.unloadName }),
         });
-        renderLoraList(res.loras);
-      } catch (err) { alert(`Unload failed: ${err.message}`); }
+        renderLoraList(result.loras);
+      } catch (error) {
+        updateBanner(`Could not unload LoRA: ${error.message}`, "error");
+      }
     });
   });
+}
+
+async function loadAvailableLoras() {
+  try {
+    const loras = await apiFetch("/api/loras/available");
+    if (!loras.length) {
+      DOM.availableLorasList.innerHTML = '<span class="empty-copy">No local adapters found.</span>';
+      return;
+    }
+
+    DOM.availableLorasList.innerHTML = loras
+      .map(
+        (lora) => `
+          <div class="available-lora-row">
+            <div class="lora-title">
+              <strong>${escapeHtml(lora.name)}</strong>
+              <span class="lora-path">${escapeHtml(lora.path)}</span>
+            </div>
+            <button type="button" class="btn-inline" data-fill-name="${escapeAttr(lora.name)}" data-fill-path="${escapeAttr(lora.path)}">
+              Use
+            </button>
+          </div>
+        `,
+      )
+      .join("");
+
+    DOM.availableLorasList.querySelectorAll("[data-fill-name]").forEach((button) => {
+      button.addEventListener("click", () => {
+        DOM.loraNameInput.value = button.dataset.fillName;
+        DOM.loraPathInput.value = button.dataset.fillPath;
+      });
+    });
+  } catch (error) {
+    updateBanner(`Could not scan local adapters: ${error.message}`, "error");
+  }
 }
 
 async function handleAddLora() {
   const name = DOM.loraNameInput.value.trim();
   const path = DOM.loraPathInput.value.trim();
-  const strength = parseFloat(DOM.loraStrengthInput.value);
-  if (!name || !path) { alert('Provide both a name and path for the LoRA.'); return; }
+  const strength = Number(DOM.loraStrengthInput.value);
+  if (!name || !path) {
+    updateBanner("LoRA name and path are both required.", "warning");
+    return;
+  }
 
   try {
-    const res = await apiFetch('/api/loras/load', {
-      method: 'POST',
+    const result = await apiFetch("/api/loras/load", {
+      method: "POST",
       body: JSON.stringify({ name, path, strength }),
     });
-    renderLoraList(res.loras);
-    DOM.loraNameInput.value = '';
-    DOM.loraPathInput.value = '';
-    DOM.loraStrengthInput.value = '1.0';
-    DOM.loraStrengthValue.textContent = '1.00';
-  } catch (err) {
-    alert(`Failed to load LoRA: ${err.message}`);
+    renderLoraList(result.loras);
+    DOM.loraNameInput.value = "";
+    DOM.loraPathInput.value = "";
+  } catch (error) {
+    updateBanner(`Could not load LoRA: ${error.message}`, "error");
   }
 }
 
-async function loadAvailableLoras() {
+async function handleGenerate() {
+  const payload = generationPayload();
+  if (!payload.prompt) {
+    DOM.prompt.focus();
+    updateBanner("Prompt is required before generation.", "warning");
+    return;
+  }
+
   try {
-    const available = await apiFetch('/api/loras/available');
-    if (available.length === 0) {
-      DOM.availableLorasList.innerHTML = '<span class="muted">No .safetensors files in loras/ folder</span>';
-      return;
-    }
-    DOM.availableLorasList.innerHTML = available.map((l) => `
-      <div class="lora-available-item">
-        <span>${escapeHtml(l.name)}</span>
-        <button data-name="${escapeAttr(l.name)}" data-path="${escapeAttr(l.path)}">Load</button>
-      </div>
-    `).join('');
-
-    DOM.availableLorasList.querySelectorAll('button').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        DOM.loraNameInput.value = btn.dataset.name;
-        DOM.loraPathInput.value = btn.dataset.path;
-      });
+    setGenerating(true);
+    const result = await apiFetch("/api/generate", {
+      method: "POST",
+      body: JSON.stringify(payload),
     });
-  } catch {
-    DOM.availableLorasList.innerHTML = '<span class="muted">Could not scan loras directory</span>';
+    state.results = result.images || [];
+    state.activeResult = state.results[0] || null;
+    renderResultStrip(state.results);
+    renderStage();
+    await loadHistory();
+  } catch (error) {
+    updateBanner(`Generation failed: ${error.message}`, "error");
+  } finally {
+    setGenerating(false);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+async function handleImageUpload() {
+  const file = DOM.imageUpload.files?.[0];
+  if (!file) return;
+
+  try {
+    const formData = new FormData();
+    formData.append("file", file);
+    const result = await apiFetch("/api/upload-image", { method: "POST", body: formData });
+    DOM.width.value = result.width;
+    DOM.height.value = result.height;
+    DOM.presetSelect.value = "native";
+    updateResolutionMeta();
+    setSourceImage({
+      url: result.url,
+      width: result.width,
+      height: result.height,
+      label: file.name,
+      description: "Uploaded source image. This remains the generation input until you promote another image.",
+      kind: "upload",
+    });
+  } catch (error) {
+    updateBanner(`Upload failed: ${error.message}`, "error");
+  } finally {
+    DOM.imageUpload.value = "";
+  }
 }
 
-function escapeAttr(str) {
-  return str.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+async function handleInitPipeline() {
+  try {
+    const status = await apiFetch("/api/pipeline/initialize", { method: "POST" });
+    renderStatus(status);
+    if (status.ready) {
+      renderLoraList(status.loras || []);
+      await loadAvailableLoras();
+    }
+  } catch (error) {
+    updateBanner(`Could not initialize the pipeline: ${error.message}`, "error");
+  }
 }
 
-function truncate(str, len) {
-  return str.length > len ? str.slice(0, len) + '…' : str;
+async function refreshStatus() {
+  try {
+    const status = await apiFetch("/api/status");
+    renderStatus(status);
+    if (status.ready) {
+      renderLoraList(status.loras || []);
+    }
+  } catch (error) {
+    updateBanner(`Could not reach the backend: ${error.message}`, "error");
+  }
 }
 
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
-function init() {
-  syncSliders();
-  syncResolutionInputs();
-  syncPresetSelect();
-  syncImageUpload();
-  updateResolutionMeta();
+async function loadConfig() {
+  state.config = await apiFetch("/api/config");
+  renderControls();
+  renderPresets();
+  applyConfigDefaults();
+  renderStatus(state.config.status);
+}
 
-  DOM.generateBtn.addEventListener('click', handleGenerate);
-  DOM.loraAddBtn.addEventListener('click', handleAddLora);
-
-  document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') handleGenerate();
+function bindEvents() {
+  DOM.width.addEventListener("input", updateResolutionMeta);
+  DOM.height.addEventListener("input", updateResolutionMeta);
+  DOM.presetSelect.addEventListener("change", updateResolutionMeta);
+  DOM.imageUpload.addEventListener("change", handleImageUpload);
+  DOM.generateBtn.addEventListener("click", handleGenerate);
+  DOM.clearResultsBtn.addEventListener("click", clearResults);
+  DOM.clearSourceBtn.addEventListener("click", () => setSourceImage(null));
+  DOM.initPipelineBtn.addEventListener("click", handleInitPipeline);
+  DOM.loraAddBtn.addEventListener("click", handleAddLora);
+  DOM.compareSlider.addEventListener("input", () => {
+    state.comparePosition = Number(DOM.compareSlider.value);
+    updateCompareSurface();
+  });
+  DOM.fullscreenStageBtn.addEventListener("click", async () => {
+    try {
+      if (document.fullscreenElement === DOM.stagePanel) {
+        await document.exitFullscreen();
+      } else {
+        await DOM.stagePanel.requestFullscreen();
+      }
+      renderStage();
+    } catch (error) {
+      updateBanner(`Could not toggle fullscreen: ${error.message}`, "error");
+    }
+  });
+  DOM.useActiveAsSourceBtn.addEventListener("click", () => {
+    if (!state.activeResult) return;
+    useItemAsSource(state.activeResult, "Generated source");
+  });
+  DOM.loraStrengthInput.addEventListener("input", () => {
+    DOM.loraStrengthValue.textContent = Number(DOM.loraStrengthInput.value).toFixed(2);
   });
 
-  checkStatus();
-  loadPresets();
-  loadHistory();
-  loadAvailableLoras();
-
-  setInterval(checkStatus, 10000);
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      handleGenerate();
+    }
+  });
+  document.addEventListener("fullscreenchange", renderStage);
 }
 
-document.addEventListener('DOMContentLoaded', init);
+async function init() {
+  bindEvents();
+  clearResults();
+  renderSourceCard();
+
+  try {
+    await loadConfig();
+    await loadHistory();
+    await loadAvailableLoras();
+    if (state.status?.ready) {
+      renderLoraList(state.status.loras || []);
+    }
+  } catch (error) {
+    updateBanner(`Startup failed: ${error.message}`, "error");
+  }
+
+  setInterval(refreshStatus, 10000);
+}
+
+document.addEventListener("DOMContentLoaded", init);

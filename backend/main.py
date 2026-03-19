@@ -1,117 +1,68 @@
-import os
-import uuid
-import time
+import io
 import json
 import logging
-from pathlib import Path
+import textwrap
+import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
-from PIL import Image
-import io
+from PIL import Image, ImageDraw
+from pydantic import BaseModel
 
-from backend.pipeline_manager import PipelineManager
+from backend.settings import AppSettings
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Directories
-# ---------------------------------------------------------------------------
-OUTPUT_DIR = Path(os.getenv("OUTPUT_DIR", "./outputs"))
-LORA_DIR = Path(os.getenv("LORA_DIR", "./loras"))
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-LORA_DIR.mkdir(parents=True, exist_ok=True)
-
-HISTORY_FILE = OUTPUT_DIR / "history.json"
-
-# ---------------------------------------------------------------------------
-# Pipeline singleton
-# ---------------------------------------------------------------------------
-manager: PipelineManager | None = None
+try:
+    from backend.pipeline_manager import PipelineManager
+    PIPELINE_IMPORT_ERROR = None
+except Exception as exc:  # pragma: no cover - import failure is environment-specific
+    PipelineManager = None  # type: ignore[assignment]
+    PIPELINE_IMPORT_ERROR = str(exc)
 
 
-def _load_history() -> list[dict]:
-    if HISTORY_FILE.exists():
-        try:
-            return json.loads(HISTORY_FILE.read_text())
-        except Exception:
-            return []
-    return []
-
-
-def _save_history(history: list[dict]):
-    HISTORY_FILE.write_text(json.dumps(history, indent=2))
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global manager
-    transformer_path = os.getenv("TRANSFORMER_PATH", "./models/transformer.safetensors")
-    text_encoder_id = os.getenv("TEXT_ENCODER_ID", "huihui-ai/Huihui-Qwen3-8B-abliterated-v2")
-    flux2_repo_id = os.getenv("FLUX2_REPO_ID", "black-forest-labs/FLUX.2-klein-4B")
-    civitai_model_version_id = os.getenv("CIVITAI_MODEL_VERSION_ID", "2746781")
-    hf_token = os.getenv("HF_TOKEN")
-    civitai_token = os.getenv("CIVITAI_TOKEN")
-
-    manager = PipelineManager(
-        transformer_path=transformer_path,
-        text_encoder_id=text_encoder_id,
-        flux2_repo_id=flux2_repo_id,
-        civitai_model_version_id=civitai_model_version_id,
-        hf_token=hf_token,
-        civitai_token=civitai_token,
-    )
-
-    logger.info("Checking / downloading models...")
-    manager.download_models()
-
-    logger.info("Loading pipeline onto GPU...")
-    manager.load()
-    logger.info("Pipeline ready.")
-    yield
-    logger.info("Shutting down.")
-
-
-app = FastAPI(title="Flux2 Image Generator", lifespan=lifespan)
-
-# Serve generated images
-app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
-
-# Serve frontend
+APP_SETTINGS = AppSettings.from_env()
+APP_SETTINGS.ensure_directories()
+HISTORY_FILE = APP_SETTINGS.output_dir / "history.json"
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
-app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
-
-# ---------------------------------------------------------------------------
-# Request / Response models
-# ---------------------------------------------------------------------------
 
 class GenerateRequest(BaseModel):
     prompt: str
     negative_prompt: str = ""
-    width: int = Field(default=1024, ge=256, le=4096)
-    height: int = Field(default=1024, ge=256, le=4096)
-    num_inference_steps: int = Field(default=50, ge=1, le=200)
-    guidance_scale: float = Field(default=4.0, ge=0.0, le=30.0)
-    seed: int = -1
-    num_images: int = Field(default=1, ge=1, le=4)
+    input_image_url: str | None = None
+    width: int | None = None
+    height: int | None = None
+    num_inference_steps: int | None = None
+    guidance_scale: float | None = None
+    seed: int | None = None
+    num_images: int | None = None
+    max_sequence_length: int | None = None
+    text_encoder_out_layers: str | list[int] | None = None
 
 
 class LoadLoraRequest(BaseModel):
     name: str
     path: str
-    strength: float = Field(default=1.0, ge=0.0, le=2.0)
+    strength: float = 1.0
+
+
+class UnloadLoraRequest(BaseModel):
+    name: str
 
 
 class LoraStrengthRequest(BaseModel):
     name: str
-    strength: float = Field(default=1.0, ge=0.0, le=2.0)
+    strength: float = 1.0
 
 
 class LoraToggleRequest(BaseModel):
@@ -119,58 +70,291 @@ class LoraToggleRequest(BaseModel):
     enabled: bool
 
 
-# ---------------------------------------------------------------------------
-# Endpoints
-# ---------------------------------------------------------------------------
+class PipelineRuntime:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.manager = None
+        self.state = "idle"
+        self.message = "Pipeline has not been initialized yet."
+        self.error: str | None = None
+        self.started_at: float | None = None
+        self.finished_at: float | None = None
+
+    def snapshot(self) -> dict[str, Any]:
+        manager = self.manager
+        return {
+            "ready": manager is not None and manager.pipe is not None,
+            "state": self.state,
+            "message": self.message,
+            "error": self.error,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "loras": manager.get_loaded_loras() if manager else [],
+            "resources": manager.describe_resources() if manager else {
+                "transformer_path": APP_SETTINGS.transformer_path,
+                "transformer_exists": Path(APP_SETTINGS.transformer_path).exists(),
+                "transformer_size_bytes": (
+                    Path(APP_SETTINGS.transformer_path).stat().st_size
+                    if Path(APP_SETTINGS.transformer_path).exists()
+                    else 0
+                ),
+                "text_encoder_id": APP_SETTINGS.text_encoder_id,
+                "flux2_repo_id": APP_SETTINGS.flux2_repo_id,
+                "local_files_only": not APP_SETTINGS.allow_model_downloads,
+            },
+        }
+
+
+runtime = PipelineRuntime()
+
+
+def _load_history() -> list[dict[str, Any]]:
+    if HISTORY_FILE.exists():
+        try:
+            return json.loads(HISTORY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("History file is unreadable, resetting it.")
+    return []
+
+
+def _save_history(history: list[dict[str, Any]]) -> None:
+    HISTORY_FILE.write_text(json.dumps(history, indent=2), encoding="utf-8")
+
+
+def _create_manager() -> Any:
+    if PipelineManager is None:
+        raise RuntimeError(
+            "Pipeline dependencies could not be imported. "
+            f"{PIPELINE_IMPORT_ERROR or 'Unknown import failure.'}"
+        )
+    return PipelineManager(
+        transformer_path=APP_SETTINGS.transformer_path,
+        text_encoder_id=APP_SETTINGS.text_encoder_id,
+        flux2_repo_id=APP_SETTINGS.flux2_repo_id,
+        civitai_model_version_id=APP_SETTINGS.civitai_model_version_id,
+        hf_token=APP_SETTINGS.hf_token,
+        civitai_token=APP_SETTINGS.civitai_token,
+        local_files_only=not APP_SETTINGS.allow_model_downloads,
+    )
+
+
+def initialize_pipeline(force: bool = False) -> dict[str, Any]:
+    with runtime.lock:
+        if runtime.state == "loading":
+            return runtime.snapshot()
+        if not force and runtime.manager is not None and runtime.manager.pipe is not None:
+            return runtime.snapshot()
+
+        runtime.state = "loading"
+        runtime.message = "Initializing Flux2 pipeline."
+        runtime.error = None
+        runtime.started_at = time.time()
+
+        try:
+            manager = _create_manager()
+            if APP_SETTINGS.allow_model_downloads:
+                runtime.message = "Checking model assets and downloading missing files."
+                manager.download_models()
+            else:
+                runtime.message = "Loading only from local files and cache."
+            manager.load()
+            runtime.manager = manager
+            runtime.state = "ready"
+            runtime.message = "Pipeline is ready."
+            runtime.finished_at = time.time()
+            logger.info("Pipeline initialization complete.")
+        except Exception as exc:
+            runtime.manager = None
+            runtime.state = "error"
+            runtime.error = str(exc)
+            runtime.message = (
+                "Pipeline initialization failed. "
+                "Check model paths, cached Hugging Face assets, or enable downloads in the runtime environment."
+            )
+            runtime.finished_at = time.time()
+            logger.exception("Pipeline initialization failed")
+
+        return runtime.snapshot()
+
+
+def _status_payload() -> dict[str, Any]:
+    payload = runtime.snapshot()
+    payload["settings"] = {
+        "auto_initialize": APP_SETTINGS.auto_initialize_pipeline,
+        "allow_downloads": APP_SETTINGS.allow_model_downloads,
+        "mock_generation": APP_SETTINGS.enable_mock_generation,
+    }
+    return payload
+
+
+def _save_generated_images(
+    images: list[Image.Image],
+    params: dict[str, Any],
+    resolved_seed: int,
+) -> list[dict[str, Any]]:
+    batch_id = uuid.uuid4().hex
+    history = _load_history()
+    saved_items: list[dict[str, Any]] = []
+
+    for index, image in enumerate(images):
+        filename = f"{uuid.uuid4().hex}.png"
+        filepath = APP_SETTINGS.output_dir / filename
+        image.save(str(filepath), format="PNG")
+        item = {
+            "id": filename.removesuffix(".png"),
+            "batch_id": batch_id,
+            "image_index": index,
+            "url": f"/outputs/{filename}",
+            "prompt": params["prompt"],
+            "negative_prompt": params["negative_prompt"],
+            "source_image_url": params.get("input_image_url"),
+            "width": params["width"],
+            "height": params["height"],
+            "steps": params["num_inference_steps"],
+            "guidance_scale": params["guidance_scale"],
+            "seed": resolved_seed,
+            "timestamp": time.time(),
+        }
+        saved_items.append(item)
+        history.insert(0, item)
+
+    _save_history(history)
+    return saved_items
+
+
+def _build_mock_images(params: dict[str, Any]) -> dict[str, Any]:
+    images: list[Image.Image] = []
+    resolved_seed = params["seed"] if params["seed"] >= 0 else int(time.time())
+    for index in range(params["num_images"]):
+        source_image_url = params.get("input_image_url")
+        source_image = _load_input_image_from_url(source_image_url) if source_image_url else None
+        image = (
+            source_image.convert("RGB").resize((params["width"], params["height"]))
+            if source_image is not None
+            else Image.new("RGB", (params["width"], params["height"]), color="#f2eee4")
+        )
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((0, 0, params["width"], 180), fill="#13343bcc")
+        draw.rectangle((0, params["height"] - 140, params["width"], params["height"]), fill="#c56f4dd9")
+        copy = "\n".join(
+            textwrap.wrap(
+                f"Mock generation {index + 1}\n\nPrompt: {params['prompt']}\n\nNegative: {params['negative_prompt'] or 'none'}",
+                width=34,
+            )
+        )
+        draw.text((48, 56), copy, fill="#fff8f0", spacing=8)
+        draw.text(
+            (48, params["height"] - 108),
+            (
+                f"{params['width']}x{params['height']} | "
+                f"steps {params['num_inference_steps']} | "
+                f"guidance {params['guidance_scale']:.1f} | "
+                f"seed {resolved_seed}"
+            ),
+            fill="#221814",
+        )
+        images.append(image)
+    return {"images": images, "seed": resolved_seed}
+
+
+def _normalize_uploaded_dimension(value: int, key: str) -> int:
+    minimum = APP_SETTINGS.generation_limits[key]["min"]
+    maximum = APP_SETTINGS.generation_limits[key]["max"]
+    step = APP_SETTINGS.generation_limits[key]["step"]
+    rounded = int(round(value / step) * step)
+    return max(minimum, min(maximum, rounded))
+
+
+def _resolve_output_path_from_url(url: str | None) -> Path | None:
+    if not url:
+        return None
+    candidate = url.split("?", 1)[0]
+    if not candidate.startswith("/outputs/"):
+        return None
+    output_name = candidate.removeprefix("/outputs/")
+    path = (APP_SETTINGS.output_dir / output_name).resolve()
+    try:
+        path.relative_to(APP_SETTINGS.output_dir.resolve())
+    except ValueError:
+        return None
+    return path if path.exists() else None
+
+
+def _load_input_image_from_url(url: str | None) -> Image.Image | None:
+    path = _resolve_output_path_from_url(url)
+    if path is None:
+        return None
+    with Image.open(path) as image:
+        return image.copy()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if APP_SETTINGS.auto_initialize_pipeline:
+        initialize_pipeline()
+    else:
+        runtime.state = "idle"
+        runtime.message = "Auto-initialization is disabled for this environment."
+    yield
+    runtime.manager = None
+    runtime.state = "idle"
+    runtime.message = "Pipeline shut down."
+
+
+app = FastAPI(title="Flux2 Image Generator", lifespan=lifespan)
+app.mount("/outputs", StaticFiles(directory=str(APP_SETTINGS.output_dir)), name="outputs")
+app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
+
 
 @app.get("/")
 async def serve_index():
     return FileResponse(FRONTEND_DIR / "index.html")
 
 
+@app.get("/api/config")
+async def get_config():
+    config = APP_SETTINGS.client_config()
+    config["status"] = _status_payload()
+    return config
+
+
+@app.get("/api/status")
+async def pipeline_status():
+    return _status_payload()
+
+
+@app.post("/api/pipeline/initialize")
+async def initialize_pipeline_endpoint():
+    return initialize_pipeline(force=True)
+
+
 @app.post("/api/generate")
 async def generate_image(req: GenerateRequest):
-    if manager is None:
-        raise HTTPException(status_code=503, detail="Pipeline not ready.")
+    params = APP_SETTINGS.normalize_generation_params(req.model_dump())
+    params["input_image_url"] = req.input_image_url
+    if not params["prompt"]:
+        raise HTTPException(status_code=400, detail="Prompt is required.")
+
+    input_image = _load_input_image_from_url(req.input_image_url)
+    if req.input_image_url and input_image is None:
+        raise HTTPException(status_code=400, detail="Selected source image could not be found.")
+
     try:
-        images = manager.generate(
-            prompt=req.prompt,
-            negative_prompt=req.negative_prompt,
-            width=req.width,
-            height=req.height,
-            num_inference_steps=req.num_inference_steps,
-            guidance_scale=req.guidance_scale,
-            seed=req.seed,
-            num_images=req.num_images,
-        )
-    except Exception as e:
+        if runtime.manager is not None and runtime.manager.pipe is not None:
+            result = runtime.manager.generate(**params, input_image=input_image)
+        elif APP_SETTINGS.enable_mock_generation:
+            result = _build_mock_images(params)
+        else:
+            detail = runtime.error or runtime.message or "Pipeline not ready."
+            raise HTTPException(status_code=503, detail=detail)
+    except HTTPException:
+        raise
+    except Exception as exc:
         logger.exception("Generation failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(exc))
 
-    saved_paths = []
-    history = _load_history()
-    for img in images:
-        filename = f"{uuid.uuid4().hex}.png"
-        filepath = OUTPUT_DIR / filename
-        img.save(str(filepath), format="PNG")  # lossless PNG, no compression
-        url = f"/outputs/{filename}"
-        saved_paths.append(url)
-
-        history.insert(0, {
-            "id": filename.replace(".png", ""),
-            "url": url,
-            "prompt": req.prompt,
-            "negative_prompt": req.negative_prompt,
-            "width": req.width,
-            "height": req.height,
-            "steps": req.num_inference_steps,
-            "guidance_scale": req.guidance_scale,
-            "seed": req.seed,
-            "timestamp": time.time(),
-        })
-
-    _save_history(history)
-    return {"images": saved_paths, "count": len(saved_paths)}
+    saved_items = _save_generated_images(result["images"], params, result["seed"])
+    return {"images": saved_items, "count": len(saved_items), "seed": result["seed"]}
 
 
 @app.get("/api/history")
@@ -181,132 +365,95 @@ async def get_history():
 @app.delete("/api/history/{image_id}")
 async def delete_history_item(image_id: str):
     history = _load_history()
-    filepath = OUTPUT_DIR / f"{image_id}.png"
-    history = [h for h in history if h["id"] != image_id]
-    _save_history(history)
+    filepath = APP_SETTINGS.output_dir / f"{image_id}.png"
+    updated = [item for item in history if item["id"] != image_id]
+    _save_history(updated)
     if filepath.exists():
         filepath.unlink()
     return {"status": "ok"}
 
 
-# LoRA endpoints
 @app.get("/api/loras")
 async def list_loras():
-    if manager is None:
+    if runtime.manager is None or runtime.manager.pipe is None:
         raise HTTPException(status_code=503, detail="Pipeline not ready.")
-    return manager.get_loaded_loras()
+    return runtime.manager.get_loaded_loras()
 
 
 @app.get("/api/loras/available")
 async def list_available_loras():
-    """List .safetensors files in the loras directory that can be loaded."""
     files = []
-    for f in LORA_DIR.glob("*.safetensors"):
-        files.append({"name": f.stem, "path": str(f)})
+    for file_path in sorted(APP_SETTINGS.lora_dir.rglob("*.safetensors")):
+        files.append({"name": file_path.stem, "path": str(file_path)})
     return files
 
 
 @app.post("/api/loras/load")
 async def load_lora(req: LoadLoraRequest):
-    if manager is None:
+    if runtime.manager is None or runtime.manager.pipe is None:
         raise HTTPException(status_code=503, detail="Pipeline not ready.")
     try:
-        manager.load_lora(name=req.name, path=req.path, strength=req.strength)
-    except Exception as e:
+        runtime.manager.load_lora(name=req.name, path=req.path, strength=req.strength)
+    except Exception as exc:
         logger.exception("LoRA load failed")
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "ok", "loras": manager.get_loaded_loras()}
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "loras": runtime.manager.get_loaded_loras()}
 
 
 @app.post("/api/loras/unload")
-async def unload_lora(req: LoadLoraRequest):
-    if manager is None:
+async def unload_lora(req: UnloadLoraRequest):
+    if runtime.manager is None or runtime.manager.pipe is None:
         raise HTTPException(status_code=503, detail="Pipeline not ready.")
     try:
-        manager.unload_lora(name=req.name)
-    except Exception as e:
+        runtime.manager.unload_lora(name=req.name)
+    except Exception as exc:
         logger.exception("LoRA unload failed")
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "ok", "loras": manager.get_loaded_loras()}
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "loras": runtime.manager.get_loaded_loras()}
 
 
 @app.post("/api/loras/strength")
 async def set_lora_strength(req: LoraStrengthRequest):
-    if manager is None:
+    if runtime.manager is None or runtime.manager.pipe is None:
         raise HTTPException(status_code=503, detail="Pipeline not ready.")
     try:
-        manager.set_lora_strength(name=req.name, strength=req.strength)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "ok", "loras": manager.get_loaded_loras()}
+        runtime.manager.set_lora_strength(name=req.name, strength=req.strength)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "loras": runtime.manager.get_loaded_loras()}
 
 
 @app.post("/api/loras/toggle")
 async def toggle_lora(req: LoraToggleRequest):
-    if manager is None:
+    if runtime.manager is None or runtime.manager.pipe is None:
         raise HTTPException(status_code=503, detail="Pipeline not ready.")
     try:
-        manager.toggle_lora(name=req.name, enabled=req.enabled)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"status": "ok", "loras": manager.get_loaded_loras()}
+        runtime.manager.toggle_lora(name=req.name, enabled=req.enabled)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", "loras": runtime.manager.get_loaded_loras()}
 
-
-@app.get("/api/status")
-async def pipeline_status():
-    return {
-        "ready": manager is not None and manager.pipe is not None,
-        "loras": manager.get_loaded_loras() if manager else [],
-    }
-
-
-# ---------------------------------------------------------------------------
-# Quality Presets (up to 4 MP)
-# ---------------------------------------------------------------------------
-QUALITY_PRESETS = [
-    {"name": "0.25 MP", "megapixels": 0.25},
-    {"name": "0.5 MP",  "megapixels": 0.5},
-    {"name": "1 MP",    "megapixels": 1.0},
-    {"name": "1.5 MP",  "megapixels": 1.5},
-    {"name": "2 MP",    "megapixels": 2.0},
-    {"name": "3 MP",    "megapixels": 3.0},
-    {"name": "4 MP",    "megapixels": 4.0},
-]
-
-
-@app.get("/api/presets")
-async def get_quality_presets():
-    return QUALITY_PRESETS
-
-
-# ---------------------------------------------------------------------------
-# Image Upload — auto detect dimensions
-# ---------------------------------------------------------------------------
 
 @app.post("/api/upload-image")
 async def upload_image(file: UploadFile = File(...)):
-    """Accept an image upload, return its dimensions (auto-sets width/height in UI)."""
     try:
         contents = await file.read()
-        img = Image.open(io.BytesIO(contents))
-        w, h = img.size
+        image = Image.open(io.BytesIO(contents))
+        width, height = image.size
+        normalized_width = _normalize_uploaded_dimension(width, "width")
+        normalized_height = _normalize_uploaded_dimension(height, "height")
 
-        # Round to nearest 64 for model compatibility
-        w = max(256, min(4096, (w // 64) * 64))
-        h = max(256, min(4096, (h // 64) * 64))
-
-        # Save uploaded image to outputs so it can be referenced
         filename = f"upload_{uuid.uuid4().hex}.png"
-        filepath = OUTPUT_DIR / filename
-        img.save(str(filepath), format="PNG")
+        filepath = APP_SETTINGS.output_dir / filename
+        image.save(str(filepath), format="PNG")
 
         return {
-            "width": w,
-            "height": h,
-            "original_width": img.size[0],
-            "original_height": img.size[1],
+            "width": normalized_width,
+            "height": normalized_height,
+            "original_width": width,
+            "original_height": height,
             "url": f"/outputs/{filename}",
         }
-    except Exception as e:
+    except Exception as exc:
         logger.exception("Image upload failed")
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(exc))

@@ -1,5 +1,5 @@
 torch
-diffusers>=0.37.0
+git+https://github.com/huggingface/diffusers.git
 transformers>=4.51.0
 accelerate
 safetensors

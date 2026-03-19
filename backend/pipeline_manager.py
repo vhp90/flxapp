@@ -9,9 +9,11 @@ Handles:
 """
 
 import os
+import random
 import torch
 import logging
 from pathlib import Path
+from PIL import Image
 
 from diffusers import (
     Flux2KleinPipeline,
@@ -30,6 +32,49 @@ from backend.model_downloader import (
 logger = logging.getLogger(__name__)
 
 
+def _patch_diffusers_flux2_key_map():
+    """
+    Monkey-patch missing BFL native-format key mappings into diffusers'
+    FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP.
+
+    The CivitAI safetensors uses BFL/ComfyUI native key names such as
+    `img_attn.norm.key_norm` and `img_attn.norm.query_norm` which were
+    not included in older diffusers releases. This patch adds them so
+    from_single_file works regardless of installed diffusers version.
+    """
+    try:
+        import diffusers.loaders.single_file_utils as sfu
+
+        # Keys present in BFL/ComfyUI native checkpoints that older
+        # diffusers builds don't know how to remap.
+        missing = {
+            # img (image) stream norms
+            "img_attn.norm.key_norm":   "attn.norm_k",
+            "img_attn.norm.query_norm": "attn.norm_q",
+            # txt (text) stream norms
+            "txt_attn.norm.key_norm":   "attn.norm_k",
+            "txt_attn.norm.query_norm": "attn.norm_q",
+        }
+
+        patched = 0
+        for native_key, diffusers_key in missing.items():
+            if native_key not in sfu.FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP:
+                sfu.FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP[native_key] = diffusers_key
+                patched += 1
+
+        if patched:
+            logger.info(
+                "Patched %d missing key(s) into FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP "
+                "(diffusers version too old).",
+                patched,
+            )
+        else:
+            logger.info("FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP already up to date.")
+
+    except (AttributeError, ImportError) as e:
+        logger.warning("Could not patch FLUX2_TRANSFORMER_DOUBLE_BLOCK_KEY_MAP: %s", e)
+
+
 class PipelineManager:
     """
     Manages a Flux2KleinPipeline instance with dynamic LoRA loading/unloading.
@@ -44,6 +89,7 @@ class PipelineManager:
         civitai_model_version_id: str,
         hf_token: str | None = None,
         civitai_token: str | None = None,
+        local_files_only: bool = False,
     ):
         self.transformer_path = transformer_path
         self.text_encoder_id = text_encoder_id
@@ -51,6 +97,7 @@ class PipelineManager:
         self.civitai_model_version_id = civitai_model_version_id
         self.hf_token = hf_token
         self.civitai_token = civitai_token
+        self.local_files_only = local_files_only
         self.pipe = None
         self.loaded_loras: dict[str, dict] = {}
         self._adapter_counter = 0
@@ -84,6 +131,9 @@ class PipelineManager:
     def load(self):
         """Load the full pipeline onto GPU from downloaded components."""
 
+        # Patch any missing key mappings in diffusers before loading
+        _patch_diffusers_flux2_key_map()
+
         # ---------- Transformer (from CivitAI safetensors) ----------
         logger.info("Loading transformer from: %s", self.transformer_path)
         transformer = Flux2Transformer2DModel.from_single_file(
@@ -96,11 +146,13 @@ class PipelineManager:
         tokenizer = Qwen2TokenizerFast.from_pretrained(
             self.text_encoder_id,
             token=self.hf_token,
+            local_files_only=self.local_files_only,
         )
         text_encoder = Qwen3ForCausalLM.from_pretrained(
             self.text_encoder_id,
             torch_dtype=torch.bfloat16,
             token=self.hf_token,
+            local_files_only=self.local_files_only,
         ).to("cuda")
 
         # ---------- VAE (from official Flux2 repo) ----------
@@ -113,6 +165,7 @@ class PipelineManager:
                 subfolder="vae",
                 torch_dtype=torch.bfloat16,
                 token=self.hf_token,
+                local_files_only=self.local_files_only,
             ).to("cuda")
         except (ImportError, Exception) as e:
             logger.warning("AutoencoderKLFlux2 not available (%s), trying AutoencoderKL...", e)
@@ -121,6 +174,7 @@ class PipelineManager:
                 subfolder="vae",
                 torch_dtype=torch.bfloat16,
                 token=self.hf_token,
+                local_files_only=self.local_files_only,
             ).to("cuda")
 
         # ---------- Scheduler ----------
@@ -130,6 +184,7 @@ class PipelineManager:
                 self.flux2_repo_id,
                 subfolder="scheduler",
                 token=self.hf_token,
+                local_files_only=self.local_files_only,
             )
         except Exception:
             logger.warning("Could not load scheduler config from repo, using defaults.")
@@ -178,6 +233,7 @@ class PipelineManager:
         seed: int = -1,
         num_images: int = 1,
         text_encoder_out_layers: tuple = (9, 18, 27),
+        input_image: Image.Image | None = None,
     ):
         """Generate images with current pipeline state."""
         if self.pipe is None:
@@ -185,9 +241,8 @@ class PipelineManager:
 
         self._apply_active_loras()
 
-        generator = None
-        if seed >= 0:
-            generator = torch.Generator(device="cuda").manual_seed(seed)
+        resolved_seed = seed if seed >= 0 else random.randint(0, 2**31 - 1)
+        generator = torch.Generator(device="cuda").manual_seed(resolved_seed)
 
         kwargs = dict(
             prompt=prompt,
@@ -200,11 +255,17 @@ class PipelineManager:
             text_encoder_out_layers=text_encoder_out_layers,
         )
 
+        if input_image is not None:
+            kwargs["image"] = input_image
+
         if negative_prompt:
             kwargs["negative_prompt_embeds"] = negative_prompt
 
         result = self.pipe(**kwargs)
-        return result.images
+        return {
+            "images": result.images,
+            "seed": resolved_seed,
+        }
 
     # ------------------------------------------------------------------
     # LoRA Management
@@ -255,6 +316,17 @@ class PipelineManager:
             {"name": n, "path": i["path"], "strength": i["strength"], "enabled": i["enabled"]}
             for n, i in self.loaded_loras.items()
         ]
+
+    def describe_resources(self) -> dict:
+        transformer = Path(self.transformer_path)
+        return {
+            "transformer_path": self.transformer_path,
+            "transformer_exists": transformer.exists(),
+            "transformer_size_bytes": transformer.stat().st_size if transformer.exists() else 0,
+            "text_encoder_id": self.text_encoder_id,
+            "flux2_repo_id": self.flux2_repo_id,
+            "local_files_only": self.local_files_only,
+        }
 
     def _apply_active_loras(self):
         active_adapters = []

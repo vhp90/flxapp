@@ -3,152 +3,277 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Flux2 — Image Generator</title>
-  <meta name="description" content="Custom Flux2 Klein image generation interface with multi-LoRA support" />
+  <title>Flux2 Klein Studio</title>
+  <meta
+    name="description"
+    content="Studio-style Flux2 Klein interface with persistent source image flow, compare slider, and runtime-driven controls."
+  />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700&display=swap"
+    rel="stylesheet"
+  />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <div id="app">
-    <!-- Header -->
-    <header id="header">
-      <div class="header-brand">
-        <div class="logo-icon">⚡</div>
-        <h1>Flux2 <span class="accent">Klein</span></h1>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">Flux2 orchestration</p>
+        <h1>Flux2 Klein Studio</h1>
       </div>
-      <div class="header-status">
-        <span id="pipeline-status" class="status-badge offline">Connecting…</span>
+      <div class="topbar-actions">
+        <span id="pipeline-status" class="status-pill offline">Checking runtime</span>
+        <button id="init-pipeline-btn" class="btn btn-secondary" type="button">Retry pipeline init</button>
       </div>
     </header>
 
-    <!-- Main Layout -->
-    <main id="main-layout">
-      <!-- Left Panel: Controls -->
-      <aside id="controls-panel">
-        <!-- Prompt Section -->
-        <section class="panel-section" id="prompt-section">
-          <h2 class="section-title">Prompt</h2>
-          <textarea id="prompt-input" placeholder="Describe the image you want to generate…" rows="4"></textarea>
-          <h2 class="section-title sub">Negative Prompt</h2>
-          <textarea id="negative-prompt-input" placeholder="What to avoid…" rows="2"></textarea>
-        </section>
+    <section id="status-banner" class="status-banner hidden"></section>
 
-        <!-- Resolution + Output Quality -->
-        <section class="panel-section" id="resolution-section">
-          <h2 class="section-title">Resolution</h2>
-          <!-- Image Upload for Auto Dimensions -->
-          <div class="upload-zone" id="upload-zone">
+    <main class="studio-layout">
+      <aside class="sidebar">
+        <section class="panel source-panel">
+          <div class="panel-header">
+            <div>
+              <p class="section-kicker">Source</p>
+              <h2>Generation input</h2>
+            </div>
+          </div>
+
+          <div class="upload-panel">
             <input type="file" id="image-upload" accept="image/*" />
             <label for="image-upload" class="upload-label">
-              <span class="upload-icon">📷</span>
-              <span>Upload image to auto-detect dimensions</span>
+              <span class="upload-title">Upload base image</span>
+              <span class="upload-copy">
+                This stays as the source for generation until you explicitly promote a generated image.
+              </span>
             </label>
           </div>
-          <div class="settings-grid two-col">
-            <div class="setting-item">
-              <label for="width-input">Base Width</label>
-              <input type="number" id="width-input" value="1024" min="256" max="4096" step="64" />
+
+          <div id="source-card" class="source-card empty">
+            <div class="source-preview empty-state">
+              <p>No source image yet</p>
+              <span>Upload one to anchor dimensions and image-guided generation.</span>
             </div>
-            <div class="setting-item">
-              <label for="height-input">Base Height</label>
-              <input type="number" id="height-input" value="1024" min="256" max="4096" step="64" />
+            <div class="source-copy">
+              <strong id="source-title">No source selected</strong>
+              <span id="source-description">The stage will show your upload here first.</span>
             </div>
           </div>
-          <div class="resolution-meta">
-            <span id="megapixel-display">1.00 MP</span>
+
+          <div class="source-actions">
+            <button id="clear-source-btn" class="btn btn-ghost" type="button">Clear source</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="section-kicker">Prompting</p>
+              <h2>Build the request</h2>
+            </div>
+            <div class="panel-chip">Ctrl/Cmd + Enter</div>
+          </div>
+
+          <label class="field-label" for="prompt-input">Prompt</label>
+          <textarea
+            id="prompt-input"
+            rows="5"
+            placeholder="Describe the scene, camera, lighting, style, and composition."
+          ></textarea>
+
+          <label class="field-label" for="negative-prompt-input">Negative prompt</label>
+          <textarea
+            id="negative-prompt-input"
+            rows="3"
+            placeholder="What should the model avoid?"
+          ></textarea>
+
+          <div class="button-row">
+            <button id="generate-btn" class="btn btn-primary" type="button">
+              <span class="btn-label">Generate</span>
+              <span id="generate-spinner" class="btn-spinner hidden"></span>
+            </button>
+            <button id="clear-results-btn" class="btn btn-ghost" type="button">Clear results</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="section-kicker">Canvas</p>
+              <h2>Resolution and output</h2>
+            </div>
+          </div>
+
+          <div class="grid two-up">
+            <div class="field-group">
+              <label class="field-label" for="width-input">Width</label>
+              <input type="number" id="width-input" />
+            </div>
+            <div class="field-group">
+              <label class="field-label" for="height-input">Height</label>
+              <input type="number" id="height-input" />
+            </div>
+          </div>
+
+          <div class="meta-row">
+            <span id="megapixel-display">0.00 MP</span>
             <span id="aspect-display">1:1</span>
           </div>
-          <h2 class="section-title sub">Output Quality</h2>
-          <div class="preset-bar">
-            <select id="preset-select">
-              <option value="native">Native (use base dimensions)</option>
-              <!-- populated dynamically from /api/presets -->
-            </select>
+
+          <div class="field-group">
+            <label class="field-label" for="preset-select">Output preset</label>
+            <select id="preset-select"></select>
           </div>
-          <div class="output-dims" id="output-dims">
-            <span>Output: <strong id="output-width">1024</strong> × <strong id="output-height">1024</strong></span>
-            <span class="output-mp" id="output-mp">1.00 MP</span>
+
+          <div class="output-summary">
+            <div>
+              <p class="micro-label">Resolved output</p>
+              <strong><span id="output-width">0</span> x <span id="output-height">0</span></strong>
+            </div>
+            <span id="output-mp" class="summary-pill">0.00 MP</span>
           </div>
         </section>
 
-        <!-- Generation Settings -->
-        <section class="panel-section" id="settings-section">
-          <h2 class="section-title">Generation</h2>
-          <div class="settings-grid">
-            <div class="setting-item full-width">
-              <label for="steps-slider">Steps <span class="value-display" id="steps-value">50</span></label>
-              <input type="range" id="steps-slider" min="1" max="200" value="50" />
-            </div>
-            <div class="setting-item full-width">
-              <label for="guidance-slider">Guidance Scale <span class="value-display" id="guidance-value">4.0</span></label>
-              <input type="range" id="guidance-slider" min="0" max="30" step="0.5" value="4.0" />
-            </div>
-            <div class="setting-item">
-              <label for="seed-input">Seed (-1 = random)</label>
-              <input type="number" id="seed-input" value="-1" min="-1" />
-            </div>
-            <div class="setting-item">
-              <label for="num-images-input">Images</label>
-              <input type="number" id="num-images-input" value="1" min="1" max="4" />
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="section-kicker">Sampling</p>
+              <h2>Generation controls</h2>
             </div>
           </div>
+          <div id="sampling-controls" class="dynamic-controls"></div>
+          <p class="panel-note">Aligned to FLUX.2 [klein] 9B distilled defaults: 4 steps and guidance 1.0.</p>
         </section>
 
-        <!-- LoRA Section -->
-        <section class="panel-section" id="lora-section">
-          <h2 class="section-title">LoRA Adapters</h2>
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="section-kicker">Adapters</p>
+              <h2>LoRA stack</h2>
+            </div>
+          </div>
+
           <div id="lora-list" class="lora-list">
-            <!-- Loaded LoRAs rendered here -->
+            <span class="empty-copy">No LoRAs loaded.</span>
           </div>
-          <div class="lora-add-form">
-            <input type="text" id="lora-name-input" placeholder="Name" />
-            <input type="text" id="lora-path-input" placeholder="Path or URL to .safetensors" />
-            <div class="lora-add-row">
-              <label>Strength <span class="value-display" id="lora-strength-value">1.00</span></label>
-              <input type="range" id="lora-strength-input" min="0" max="2" step="0.05" value="1.0" />
+
+          <div class="lora-form">
+            <div class="grid two-up">
+              <div class="field-group">
+                <label class="field-label" for="lora-name-input">Display name</label>
+                <input type="text" id="lora-name-input" placeholder="Portrait polish" />
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="lora-strength-input">Strength</label>
+                <div class="slider-shell">
+                  <input type="range" id="lora-strength-input" min="0" max="2" step="0.05" value="1" />
+                  <span id="lora-strength-value" class="slider-value">1.00</span>
+                </div>
+              </div>
             </div>
-            <button id="lora-add-btn" class="btn btn-secondary">+ Add LoRA</button>
+
+            <div class="field-group">
+              <label class="field-label" for="lora-path-input">Path</label>
+              <input type="text" id="lora-path-input" placeholder="./loras/example.safetensors" />
+            </div>
+
+            <button id="lora-add-btn" class="btn btn-secondary" type="button">Load LoRA</button>
           </div>
-          <div class="lora-available-section">
-            <h3 class="section-subtitle">Available on Disk</h3>
-            <div id="available-loras-list" class="lora-available-list">
-              <span class="muted">Scanning…</span>
+
+          <div class="stack-block">
+            <p class="micro-label">Available on disk</p>
+            <div id="available-loras-list" class="available-loras-list">
+              <span class="empty-copy">Scanning local adapters.</span>
             </div>
           </div>
         </section>
 
-        <!-- Generate Button -->
-        <button id="generate-btn" class="btn btn-primary">
-          <span class="btn-label">Generate</span>
-          <span class="btn-spinner hidden" id="generate-spinner"></span>
-        </button>
-      </aside>
-
-      <!-- Center: Preview -->
-      <section id="preview-panel">
-        <div id="preview-container">
-          <div id="preview-placeholder">
-            <div class="placeholder-icon">🎨</div>
-            <p>Your generated image will appear here</p>
+        <section class="panel runtime-panel">
+          <div class="panel-header">
+            <div>
+              <p class="section-kicker">Runtime</p>
+              <h2>Active configuration</h2>
+            </div>
           </div>
-          <img id="preview-image" class="hidden" alt="Generated image" />
-        </div>
-        <div id="preview-meta" class="hidden">
-          <span id="meta-resolution"></span>
-          <span id="meta-steps"></span>
-          <span id="meta-seed"></span>
-        </div>
-      </section>
-
-      <!-- Right Panel: History -->
-      <aside id="history-panel">
-        <h2 class="section-title">History</h2>
-        <div id="history-list">
-          <span class="muted">No images yet</span>
-        </div>
+          <dl id="runtime-facts" class="runtime-facts"></dl>
+        </section>
       </aside>
+
+      <section class="stage-column">
+        <section class="stage-panel">
+          <div class="stage-header">
+            <div>
+              <p class="section-kicker">Canvas</p>
+              <h2 id="stage-title">Studio canvas</h2>
+            </div>
+            <div class="stage-actions">
+              <span id="compare-mode-badge" class="summary-pill hidden">Compare mode</span>
+              <button id="fullscreen-stage-btn" class="btn btn-secondary hidden" type="button">Fullscreen compare</button>
+              <button id="use-active-as-source-btn" class="btn btn-ghost hidden" type="button">Use active image as source</button>
+            </div>
+          </div>
+
+          <div id="canvas-meta" class="canvas-meta"></div>
+
+          <div id="stage-placeholder" class="stage-placeholder">
+            <p class="stage-placeholder-title">Bring in a source, then render.</p>
+            <p class="stage-placeholder-copy">
+              Upload a base image to anchor the canvas, then generate and compare results with the vertical splitter.
+            </p>
+          </div>
+
+          <div id="single-stage" class="single-stage hidden">
+            <img id="single-stage-image" alt="Stage preview" />
+            <div class="stage-label-row">
+              <span id="single-stage-label" class="stage-label">Preview</span>
+            </div>
+          </div>
+
+          <div id="compare-stage" class="compare-stage hidden">
+            <div class="compare-surface">
+              <img id="compare-before-image" class="compare-image base" alt="Source image" />
+              <div id="compare-after-shell" class="compare-after-shell">
+                <img id="compare-after-image" class="compare-image overlay" alt="Generated image" />
+              </div>
+              <div id="compare-divider" class="compare-divider"></div>
+              <div class="compare-label before">Source</div>
+              <div class="compare-label after">Generated</div>
+            </div>
+            <div class="compare-control">
+              <span class="micro-label">Before / after</span>
+              <input id="compare-slider" type="range" min="0" max="100" value="50" />
+            </div>
+          </div>
+        </section>
+
+        <section class="dock-panel">
+          <div class="dock-section">
+            <div class="dock-header">
+              <div>
+                <p class="section-kicker">Fresh renders</p>
+                <h3>Current batch</h3>
+              </div>
+              <span id="result-count" class="summary-pill">0 images</span>
+            </div>
+            <div id="result-strip" class="thumb-grid"></div>
+          </div>
+
+          <div class="dock-section">
+            <div class="dock-header">
+              <div>
+                <p class="section-kicker">Archive</p>
+                <h3>History</h3>
+              </div>
+            </div>
+            <div id="history-list" class="history-grid">
+              <span class="empty-copy">No images saved yet.</span>
+            </div>
+          </div>
+        </section>
+      </section>
     </main>
   </div>
 

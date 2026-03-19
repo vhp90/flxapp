@@ -1,26 +1,28 @@
 #!/usr/bin/env bash
-# Run the Flux2 Image Generator server
-# Usage: bash run.sh
 
-set -e
+set -euo pipefail
 
-# Ensure required directories
 mkdir -p outputs loras models
 
-# Install aria2c for fast CivitAI downloads (if not already installed)
-if ! command -v aria2c &> /dev/null; then
-  echo "Installing aria2 for fast multi-connection downloads..."
-  sudo apt-get update -qq && sudo apt-get install -y -qq aria2
+export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"
+
+echo "Starting Flux2 server on ${HOST:-0.0.0.0}:${PORT:-8080}"
+echo "AUTO_INITIALIZE_PIPELINE=${AUTO_INITIALIZE_PIPELINE:-true}"
+echo "ALLOW_MODEL_DOWNLOADS=${ALLOW_MODEL_DOWNLOADS:-false}"
+echo "ENABLE_MOCK_GENERATION=${ENABLE_MOCK_GENERATION:-false}"
+echo ""
+echo "Tip: in Lightning, set ALLOW_MODEL_DOWNLOADS=true if the Hugging Face assets are not already cached."
+echo "Tip: for local UI development, set ENABLE_MOCK_GENERATION=true to avoid model work entirely."
+echo ""
+
+UVICORN_ARGS=(
+  backend.main:app
+  --host "${HOST:-0.0.0.0}"
+  --port "${PORT:-8080}"
+)
+
+if [[ "${RELOAD:-0}" == "1" ]]; then
+  UVICORN_ARGS+=(--reload)
 fi
 
-# Enable hf_transfer for fast HuggingFace downloads
-export HF_HUB_ENABLE_HF_TRANSFER=1
-
-# Start the FastAPI server
-echo "Starting Flux2 server on ${HOST:-0.0.0.0}:${PORT:-8080} ..."
-echo "On first run, models will be downloaded automatically."
-echo ""
-python -m uvicorn backend.main:app \
-  --host "${HOST:-0.0.0.0}" \
-  --port "${PORT:-8080}" \
-  --reload
+python -m uvicorn "${UVICORN_ARGS[@]}"

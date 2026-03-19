@@ -8,6 +8,8 @@ Custom GUI application for generating and editing images using [Flux2 Klein 9B](
 - **No Safety Filters**: All safety checkers / watermarkers are disabled.
 - **Multi-LoRA**: Load, unload, toggle, and adjust strength of multiple LoRA adapters from the UI in real time.
 - **History Tab**: All generated images are saved as lossless PNGs and displayed in a history sidebar.
+- **Runtime-driven UI**: Generation defaults, limits, and presets come from the backend instead of being hardcoded in the frontend.
+- **Safe Local Dev Mode**: The app can run without downloading models, and can optionally use mock image generation for frontend work.
 - **Vanilla Tech Stack**: Pure HTML/CSS/JS frontend — no build step, no framework bloat.
 
 ## Quick Start (Lightning.ai Studio)
@@ -16,6 +18,7 @@ Custom GUI application for generating and editing images using [Flux2 Klein 9B](
    ```bash
    cp .env.example .env
    # Edit .env — set your HF_TOKEN, CIVITAI_TOKEN, TRANSFORMER_PATH, etc.
+   # In Lightning, set ALLOW_MODEL_DOWNLOADS=true if HF assets are not already cached.
    ```
 
 2. **Download the model**
@@ -33,6 +36,16 @@ Custom GUI application for generating and editing images using [Flux2 Klein 9B](
    The server starts at `http://0.0.0.0:8080`. Open this in your browser.
 
 5. **Add LoRAs** — Drop `.safetensors` files into `./loras/` and they'll appear in the UI.
+
+## Runtime Modes
+
+- **Lightning runtime**: keep `AUTO_INITIALIZE_PIPELINE=true`. Set `ALLOW_MODEL_DOWNLOADS=true` when the text encoder / VAE / scheduler are not already cached in the environment.
+- **Local frontend development**: keep `ALLOW_MODEL_DOWNLOADS=false` and set `ENABLE_MOCK_GENERATION=true` to work on the UI without touching real model assets.
+
+## Flux2 Klein 9B Defaults
+
+- The official `black-forest-labs/FLUX.2-klein-9B` model card describes the 9B model as step-distilled to **4 inference steps**.
+- The official Diffusers example for that model uses **`guidance_scale=1.0`** and **`num_inference_steps=4`**.
 
 ## Project Structure
 ```
