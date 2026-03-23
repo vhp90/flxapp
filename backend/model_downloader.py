@@ -3,6 +3,7 @@ Auto-download utilities for CivitAI and HuggingFace models.
 
 - CivitAI: Uses aria2c (16 connections) when available, falls back to fast HTTP streaming.
 - HuggingFace: Uses huggingface_hub with hf_transfer for fast parallel downloads.
+- Parallel: All model components download simultaneously via ThreadPoolExecutor.
 """
 
 import os
@@ -11,9 +12,21 @@ import subprocess
 import logging
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _enable_hf_transfer():
+    """Enable hf_transfer for Rust-based parallel chunked downloads."""
+    try:
+        import hf_transfer  # noqa: F401
+        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
+        return True
+    except ImportError:
+        return False
+
 
 # ---------------------------------------------------------------------------
 # CivitAI Download
@@ -174,12 +187,7 @@ def ensure_hf_model_cached(model_id: str, token: str | None = None) -> str:
     Returns the model_id (transformers/diffusers will use cached version).
     Uses hf_transfer for speed if available.
     """
-    try:
-        import hf_transfer  # noqa: F401
-        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-        logger.info("hf_transfer enabled for fast downloads.")
-    except ImportError:
-        pass
+    _enable_hf_transfer()
 
     from huggingface_hub import snapshot_download
 
@@ -201,11 +209,7 @@ def ensure_hf_subfolder_cached(
     Download only a specific subfolder from a HuggingFace repo.
     Returns the repo_id (caller uses subfolder= when loading).
     """
-    try:
-        import hf_transfer  # noqa: F401
-        os.environ.setdefault("HF_HUB_ENABLE_HF_TRANSFER", "1")
-    except ImportError:
-        pass
+    _enable_hf_transfer()
 
     from huggingface_hub import snapshot_download
 
@@ -216,3 +220,125 @@ def ensure_hf_subfolder_cached(
         token=token,
     )
     return repo_id
+
+
+def ensure_hf_file_cached(
+    repo_id: str,
+    filename: str,
+    token: str | None = None,
+) -> str:
+    """
+    Download only a specific file from a HuggingFace repo.
+    """
+    _enable_hf_transfer()
+
+    from huggingface_hub import hf_hub_download
+
+    logger.info("Ensuring HF file cached: %s/%s", repo_id, filename)
+    hf_hub_download(
+        repo_id,
+        filename,
+        token=token,
+    )
+    return repo_id
+
+
+# ---------------------------------------------------------------------------
+# Parallel Download Orchestrator
+# ---------------------------------------------------------------------------
+
+def download_all_models_parallel(
+    civitai_model_version_id: str,
+    transformer_path: str,
+    civitai_token: str | None,
+    text_encoder_id: str,
+    hf_token: str | None,
+    flux2_repo_id: str,
+    text_encoder_gguf_file: str | None = None,
+    text_encoder_tokenizer_id: str | None = None,
+):
+    """
+    Download ALL model components in parallel for maximum speed.
+
+    Instead of downloading sequentially (transformer → text encoder → VAE),
+    this fires off all downloads simultaneously using a thread pool.
+    Each individual download already uses its own parallel strategy:
+      - CivitAI: aria2c with 16 connections
+      - HuggingFace: hf_transfer (Rust-based parallel chunked downloads)
+
+    This function runs them ALL concurrently so total wall time ≈
+    max(single download) instead of sum(all downloads).
+    """
+    _enable_hf_transfer()
+
+    tasks: dict[str, tuple] = {}
+
+    # Task 1: CivitAI transformer
+    tasks["transformer"] = (
+        download_civitai_model,
+        {"model_version_id": civitai_model_version_id, "output_path": transformer_path, "token": civitai_token},
+    )
+
+    # Task 2: Text encoder
+    if text_encoder_gguf_file:
+        tasks["text_encoder_gguf"] = (
+            ensure_hf_file_cached,
+            {"repo_id": text_encoder_id, "filename": text_encoder_gguf_file, "token": hf_token},
+        )
+        tokenizer_id = text_encoder_tokenizer_id or text_encoder_id
+        tasks["tokenizer"] = (
+            ensure_hf_model_cached,
+            {"model_id": tokenizer_id, "token": hf_token},
+        )
+    else:
+        tasks["text_encoder"] = (
+            ensure_hf_model_cached,
+            {"model_id": text_encoder_id, "token": hf_token},
+        )
+
+    # Task 3: VAE
+    tasks["vae"] = (
+        ensure_hf_subfolder_cached,
+        {"repo_id": flux2_repo_id, "subfolder": "vae", "token": hf_token},
+    )
+
+    # Task 4: Scheduler
+    tasks["scheduler"] = (
+        ensure_hf_subfolder_cached,
+        {"repo_id": flux2_repo_id, "subfolder": "scheduler", "token": hf_token},
+    )
+
+    logger.info(
+        "=== Starting PARALLEL download of %d components: %s ===",
+        len(tasks), ", ".join(tasks.keys()),
+    )
+    start_time = time.time()
+
+    results: dict[str, str] = {}
+    errors: dict[str, str] = {}
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        future_to_name = {
+            pool.submit(fn, **kwargs): name
+            for name, (fn, kwargs) in tasks.items()
+        }
+
+        for future in as_completed(future_to_name):
+            name = future_to_name[future]
+            try:
+                result = future.result()
+                results[name] = str(result)
+                logger.info("✅ %s download complete.", name)
+            except Exception as exc:
+                errors[name] = str(exc)
+                logger.error("❌ %s download FAILED: %s", name, exc)
+
+    elapsed = time.time() - start_time
+    logger.info(
+        "=== Parallel download finished in %.1fs — %d succeeded, %d failed ===",
+        elapsed, len(results), len(errors),
+    )
+
+    if errors:
+        err_summary = "; ".join(f"{k}: {v}" for k, v in errors.items())
+        raise RuntimeError(f"Some downloads failed: {err_summary}")

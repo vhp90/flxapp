@@ -30,6 +30,8 @@ from backend.model_downloader import (
     download_civitai_model,
     ensure_hf_model_cached,
     ensure_hf_subfolder_cached,
+    ensure_hf_file_cached,
+    download_all_models_parallel,
 )
 
 logger = logging.getLogger(__name__)
@@ -166,20 +168,28 @@ class PipelineManager:
     def __init__(
         self,
         transformer_path: str,
+        transformer_dtype: str,
         text_encoder_id: str,
         flux2_repo_id: str,
         civitai_model_version_id: str,
         hf_token: str | None = None,
         civitai_token: str | None = None,
         local_files_only: bool = False,
+        text_encoder_gguf_file: str | None = None,
+        text_encoder_tokenizer_id: str | None = None,
+        low_vram_mode: bool = False,
     ):
         self.transformer_path = transformer_path
+        self.transformer_dtype = transformer_dtype
         self.text_encoder_id = text_encoder_id
         self.flux2_repo_id = flux2_repo_id
         self.civitai_model_version_id = civitai_model_version_id
         self.hf_token = hf_token
         self.civitai_token = civitai_token
         self.local_files_only = local_files_only
+        self.text_encoder_gguf_file = text_encoder_gguf_file
+        self.text_encoder_tokenizer_id = text_encoder_tokenizer_id
+        self.low_vram_mode = low_vram_mode
         self.pipe = None
         self.loaded_loras: dict[str, dict] = {}
         self._adapter_counter = 0
@@ -189,26 +199,23 @@ class PipelineManager:
     # ------------------------------------------------------------------
 
     def download_models(self):
-        """Download all required models if not already present."""
+        """
+        Download all required models in parallel for maximum speed.
 
-        # 1. CivitAI transformer
-        logger.info("=== Step 1/3: Checking CivitAI transformer ===")
-        download_civitai_model(
-            model_version_id=self.civitai_model_version_id,
-            output_path=self.transformer_path,
-            token=self.civitai_token,
+        Fires off CivitAI transformer + HF text encoder + HF VAE/scheduler
+        downloads simultaneously. Each individual download also uses its own
+        parallelism (aria2c 16-conn for CivitAI, hf_transfer for HF).
+        """
+        download_all_models_parallel(
+            civitai_model_version_id=self.civitai_model_version_id,
+            transformer_path=self.transformer_path,
+            civitai_token=self.civitai_token,
+            text_encoder_id=self.text_encoder_id,
+            hf_token=self.hf_token,
+            flux2_repo_id=self.flux2_repo_id,
+            text_encoder_gguf_file=self.text_encoder_gguf_file,
+            text_encoder_tokenizer_id=self.text_encoder_tokenizer_id,
         )
-
-        # 2. HuggingFace text encoder + tokenizer
-        logger.info("=== Step 2/3: Checking text encoder (%s) ===", self.text_encoder_id)
-        ensure_hf_model_cached(self.text_encoder_id, token=self.hf_token)
-
-        # 3. HuggingFace VAE + scheduler configs from official Flux2 repo
-        logger.info("=== Step 3/3: Checking VAE & scheduler from %s ===", self.flux2_repo_id)
-        ensure_hf_subfolder_cached(self.flux2_repo_id, "vae", token=self.hf_token)
-        ensure_hf_subfolder_cached(self.flux2_repo_id, "scheduler", token=self.hf_token)
-
-        logger.info("=== All models ready ===")
 
     def load(self):
         """Load the full pipeline onto GPU from downloaded components."""
@@ -229,27 +236,60 @@ class PipelineManager:
         )
 
         # ---------- Transformer (from CivitAI safetensors) ----------
-        logger.info("Loading transformer from: %s", self.transformer_path)
-        transformer = Flux2Transformer2DModel.from_single_file(
-            self.transformer_path,
-            config=str(transformer_config_root),
-            subfolder="transformer",
-            torch_dtype=torch.bfloat16,
-        ).to("cuda")
+        dtype_map = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "fp8": torch.float8_e4m3fn,
+        }
+        torch_dtype = dtype_map.get(self.transformer_dtype.lower(), None)
+        logger.info("Loading transformer from: %s (dtype: %s, low_vram: %s)", self.transformer_path, torch_dtype, self.low_vram_mode)
+
+        if self.low_vram_mode:
+            # In low VRAM mode, load transformer directly to CPU first,
+            # the pipeline's cpu_offload will move it on-demand.
+            transformer = Flux2Transformer2DModel.from_single_file(
+                self.transformer_path,
+                config=str(transformer_config_root),
+                subfolder="transformer",
+                torch_dtype=torch_dtype,
+            )
+        else:
+            transformer = Flux2Transformer2DModel.from_single_file(
+                self.transformer_path,
+                config=str(transformer_config_root),
+                subfolder="transformer",
+                torch_dtype=torch_dtype,
+            ).to("cuda")
 
         # ---------- Text Encoder + Tokenizer ----------
-        logger.info("Loading text encoder: %s", self.text_encoder_id)
+        tokenizer_id = self.text_encoder_tokenizer_id or self.text_encoder_id
+        logger.info("Loading tokenizer: %s", tokenizer_id)
         tokenizer = Qwen2TokenizerFast.from_pretrained(
-            self.text_encoder_id,
+            tokenizer_id,
             token=self.hf_token,
             local_files_only=self.local_files_only,
         )
-        text_encoder = Qwen3ForCausalLM.from_pretrained(
-            self.text_encoder_id,
-            torch_dtype=torch.bfloat16,
-            token=self.hf_token,
-            local_files_only=self.local_files_only,
-        ).to("cuda")
+        
+        if self.text_encoder_gguf_file:
+            logger.info("Loading GGUF text encoder: %s from %s", self.text_encoder_gguf_file, self.text_encoder_id)
+            text_encoder = Qwen3ForCausalLM.from_pretrained(
+                self.text_encoder_id,
+                gguf_file=self.text_encoder_gguf_file,
+                torch_dtype=torch.bfloat16,
+                token=self.hf_token,
+                local_files_only=self.local_files_only,
+            )
+        else:
+            logger.info("Loading text encoder: %s", self.text_encoder_id)
+            text_encoder = Qwen3ForCausalLM.from_pretrained(
+                self.text_encoder_id,
+                torch_dtype=torch.bfloat16,
+                token=self.hf_token,
+                local_files_only=self.local_files_only,
+            )
+
+        if not self.low_vram_mode:
+            text_encoder = text_encoder.to("cuda")
 
         # ---------- VAE (from official Flux2 repo) ----------
         logger.info("Loading VAE from: %s", self.flux2_repo_id)
@@ -262,7 +302,7 @@ class PipelineManager:
                 torch_dtype=torch.bfloat16,
                 token=self.hf_token,
                 local_files_only=self.local_files_only,
-            ).to("cuda")
+            )
         except (ImportError, Exception) as e:
             logger.warning("AutoencoderKLFlux2 not available (%s), trying AutoencoderKL...", e)
             vae = AutoencoderKL.from_pretrained(
@@ -271,7 +311,10 @@ class PipelineManager:
                 torch_dtype=torch.bfloat16,
                 token=self.hf_token,
                 local_files_only=self.local_files_only,
-            ).to("cuda")
+            )
+
+        if not self.low_vram_mode:
+            vae = vae.to("cuda")
 
         # ---------- Scheduler ----------
         logger.info("Loading scheduler from: %s", self.flux2_repo_id)
@@ -310,9 +353,80 @@ class PipelineManager:
             self.pipe.run_safety_checker = lambda *a, **kw: (a[0] if a else None, None)
             logger.info("Patched run_safety_checker.")
 
-        # Move entire pipeline to GPU — 96 GB VRAM available
-        self.pipe.to("cuda")
-        logger.info("Pipeline loaded on GPU successfully.")
+        if self.low_vram_mode:
+            # ----------------------------------------------------------
+            # Smart Group Offloading (much faster than sequential offload)
+            #
+            # Instead of moving individual layers one-by-one, we use
+            # diffusers' group offloading with CUDA streams to:
+            # 1. Group layers together into batches
+            # 2. Overlap GPU compute with CPU↔GPU data transfer
+            # 3. Keep peak VRAM under control (~8-9 GB on T4)
+            #
+            # Strategy:
+            # - Transformer: leaf_level offload with CUDA stream
+            #   (runs many denoising steps, needs to be fast)
+            # - Text encoder: block_level offload, groups of 4 layers
+            #   (runs once per generation, ~2GB per group)
+            # - VAE: leaf_level offload with CUDA stream
+            #   (runs once for decode, small model)
+            # ----------------------------------------------------------
+            try:
+                from diffusers.hooks import apply_group_offloading
+
+                onload_device = torch.device("cuda")
+                offload_device = torch.device("cpu")
+
+                # Transformer: leaf-level + CUDA stream for max denoising speed
+                # Each leaf module loads to GPU right before compute, async prefetch
+                apply_group_offloading(
+                    self.pipe.transformer,
+                    onload_device=onload_device,
+                    offload_device=offload_device,
+                    offload_type="leaf_level",
+                    use_stream=True,
+                    non_blocking=True,
+                )
+                logger.info("Transformer: leaf-level group offload with CUDA stream enabled.")
+
+                # Text encoder: block-level, groups of 4 transformer layers
+                # ~2GB per group on GPU, fast enough since it only runs once
+                apply_group_offloading(
+                    self.pipe.text_encoder,
+                    onload_device=onload_device,
+                    offload_device=offload_device,
+                    offload_type="block_level",
+                    num_blocks_per_group=4,
+                )
+                logger.info("Text encoder: block-level group offload (4 layers/group) enabled.")
+
+                # VAE: leaf-level + CUDA stream
+                apply_group_offloading(
+                    self.pipe.vae,
+                    onload_device=onload_device,
+                    offload_device=offload_device,
+                    offload_type="leaf_level",
+                    use_stream=True,
+                    non_blocking=True,
+                )
+                logger.info("VAE: leaf-level group offload with CUDA stream enabled.")
+
+                logger.info(
+                    "LOW VRAM MODE: smart group offloading active — "
+                    "peak VRAM ~8-9 GB, overlapping compute with data transfer."
+                )
+
+            except (ImportError, AttributeError) as e:
+                # Fallback to sequential offload if group offloading isn't available
+                logger.warning(
+                    "Group offloading not available (%s), falling back to sequential CPU offload.", e
+                )
+                self.pipe.enable_sequential_cpu_offload()
+                logger.info("LOW VRAM MODE: sequential CPU offload enabled (fallback).")
+        else:
+            # Move entire pipeline to GPU
+            self.pipe.to("cuda")
+            logger.info("Pipeline loaded on GPU successfully.")
 
     # ------------------------------------------------------------------
     # Generation
@@ -417,6 +531,7 @@ class PipelineManager:
         transformer = Path(self.transformer_path)
         return {
             "transformer_path": self.transformer_path,
+            "transformer_dtype": self.transformer_dtype,
             "transformer_exists": transformer.exists(),
             "transformer_size_bytes": transformer.stat().st_size if transformer.exists() else 0,
             "text_encoder_id": self.text_encoder_id,

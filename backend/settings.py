@@ -59,13 +59,17 @@ def _round_to_multiple(value: int, multiple: int) -> int:
 @dataclass(slots=True)
 class AppSettings:
     transformer_path: str
+    transformer_dtype: str
     text_encoder_id: str
+    text_encoder_gguf_file: str | None
+    text_encoder_tokenizer_id: str | None
     flux2_repo_id: str
     civitai_model_version_id: str
     hf_token: str | None
     civitai_token: str | None
     output_dir: Path
     lora_dir: Path
+    low_vram_mode: bool
     auto_initialize_pipeline: bool
     allow_model_downloads: bool
     enable_mock_generation: bool
@@ -85,10 +89,13 @@ class AppSettings:
         ]
         return cls(
             transformer_path=os.getenv("TRANSFORMER_PATH", "./models/transformer.safetensors"),
+            transformer_dtype=os.getenv("TRANSFORMER_DTYPE", "bfloat16"),
             text_encoder_id=os.getenv(
                 "TEXT_ENCODER_ID",
                 "huihui-ai/Huihui-Qwen3-8B-abliterated-v2",
             ),
+            text_encoder_gguf_file=os.getenv("TEXT_ENCODER_GGUF_FILE"),
+            text_encoder_tokenizer_id=os.getenv("TEXT_ENCODER_TOKENIZER_ID"),
             flux2_repo_id=os.getenv(
                 "FLUX2_REPO_ID",
                 "black-forest-labs/FLUX.2-klein-9B",
@@ -98,6 +105,7 @@ class AppSettings:
             civitai_token=os.getenv("CIVITAI_TOKEN"),
             output_dir=Path(os.getenv("OUTPUT_DIR", "./outputs")),
             lora_dir=Path(os.getenv("LORA_DIR", "./loras")),
+            low_vram_mode=_env_bool("LOW_VRAM_MODE", False),
             auto_initialize_pipeline=_env_bool("AUTO_INITIALIZE_PIPELINE", True),
             allow_model_downloads=_env_bool("ALLOW_MODEL_DOWNLOADS", False),
             enable_mock_generation=_env_bool("ENABLE_MOCK_GENERATION", False),
@@ -223,7 +231,10 @@ class AppSettings:
             },
             "model": {
                 "transformer_path": self.transformer_path,
+                "transformer_dtype": self.transformer_dtype,
                 "text_encoder_id": self.text_encoder_id,
+                "text_encoder_gguf_file": self.text_encoder_gguf_file,
+                "text_encoder_tokenizer_id": self.text_encoder_tokenizer_id,
                 "flux2_repo_id": self.flux2_repo_id,
                 "civitai_model_version_id": self.civitai_model_version_id,
             },

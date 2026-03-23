@@ -93,6 +93,7 @@ class PipelineRuntime:
             "loras": manager.get_loaded_loras() if manager else [],
             "resources": manager.describe_resources() if manager else {
                 "transformer_path": APP_SETTINGS.transformer_path,
+                "transformer_dtype": APP_SETTINGS.transformer_dtype,
                 "transformer_exists": Path(APP_SETTINGS.transformer_path).exists(),
                 "transformer_size_bytes": (
                     Path(APP_SETTINGS.transformer_path).stat().st_size
@@ -130,12 +131,16 @@ def _create_manager() -> Any:
         )
     return PipelineManager(
         transformer_path=APP_SETTINGS.transformer_path,
+        transformer_dtype=APP_SETTINGS.transformer_dtype,
         text_encoder_id=APP_SETTINGS.text_encoder_id,
         flux2_repo_id=APP_SETTINGS.flux2_repo_id,
         civitai_model_version_id=APP_SETTINGS.civitai_model_version_id,
         hf_token=APP_SETTINGS.hf_token,
         civitai_token=APP_SETTINGS.civitai_token,
         local_files_only=not APP_SETTINGS.allow_model_downloads,
+        text_encoder_gguf_file=APP_SETTINGS.text_encoder_gguf_file,
+        text_encoder_tokenizer_id=APP_SETTINGS.text_encoder_tokenizer_id,
+        low_vram_mode=APP_SETTINGS.low_vram_mode,
     )
 
 
