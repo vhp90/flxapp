@@ -108,12 +108,16 @@ def _infer_flux2_transformer_config(transformer_path: str) -> tuple[dict[str, ob
         txt_in_shape = get_shape("model.diffusion_model.txt_in.weight")
         time_in_shape = get_shape("model.diffusion_model.time_in.in_layer.weight")
         final_out_shape = get_shape("model.diffusion_model.final_layer.linear.weight")
-        q_norm_shape = get_shape("model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.weight")
+        try:
+            q_norm_shape = get_shape("model.diffusion_model.double_blocks.0.img_attn.norm.key_norm.weight")
+            attention_head_dim = q_norm_shape[0]
+        except Exception:
+            attention_head_dim = 128  # Default for FLUX architecture if QK norm is absent
+            
         double_mlp_in_shape = get_shape("model.diffusion_model.double_blocks.0.img_mlp.0.weight")
 
         inner_dim, in_channels = img_in_shape
         out_channels = final_out_shape[0]
-        attention_head_dim = q_norm_shape[0]
         num_attention_heads = inner_dim // attention_head_dim
         joint_attention_dim = txt_in_shape[1]
         timestep_guidance_channels = time_in_shape[1]
