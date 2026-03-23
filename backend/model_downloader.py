@@ -70,7 +70,10 @@ def download_civitai_model(
     logger.info("Resolving download URL for CivitAI model version %s...", model_version_id)
     final_url = url
     try:
-        head = requests.head(url, allow_redirects=True, timeout=30)
+        headers = {}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        head = requests.head(url, allow_redirects=True, headers=headers, timeout=30)
         if head.status_code == 200:
             final_url = head.url
             content_length = int(head.headers.get("content-length", 0))
@@ -84,24 +87,24 @@ def download_civitai_model(
     # Try aria2c first (fastest — multi-connection to CDN)
     if shutil.which("aria2c"):
         logger.info("Using aria2c for fast multi-connection download...")
-        success = _download_aria2c(final_url, output)
+        success = _download_aria2c(final_url, output, token)
         if success:
             return output
 
     # Try wget
     if shutil.which("wget"):
         logger.info("Using wget for download...")
-        success = _download_wget(final_url, output)
+        success = _download_wget(final_url, output, token)
         if success:
             return output
 
     # Fallback to Python requests
     logger.info("Using Python HTTP streaming download...")
-    _download_http(final_url, output)
+    _download_http(final_url, output, token=token)
     return output
 
 
-def _download_aria2c(url: str, output_path: Path) -> bool:
+def _download_aria2c(url: str, output_path: Path, token: str | None = None) -> bool:
     """Download using aria2c with multi-connection + retries."""
     try:
         cmd = [
@@ -122,8 +125,10 @@ def _download_aria2c(url: str, output_path: Path) -> bool:
             "--retry-wait=3",
             "--timeout=60",
             "--connect-timeout=30",
-            url,
         ]
+        if token:
+            cmd.extend(["--header", f"Authorization: Bearer {token}"])
+        cmd.append(url)
 
         result = subprocess.run(cmd, check=True)
         return result.returncode == 0
@@ -135,7 +140,7 @@ def _download_aria2c(url: str, output_path: Path) -> bool:
         return False
 
 
-def _download_wget(url: str, output_path: Path) -> bool:
+def _download_wget(url: str, output_path: Path, token: str | None = None) -> bool:
     """Download using wget."""
     try:
         cmd = [
@@ -143,8 +148,10 @@ def _download_wget(url: str, output_path: Path) -> bool:
             "--continue",
             "--progress=bar:force",
             "-O", str(output_path),
-            url,
         ]
+        if token:
+            cmd.extend(["--header", f"Authorization: Bearer {token}"])
+        cmd.append(url)
 
         result = subprocess.run(cmd, check=True)
         return result.returncode == 0
@@ -153,11 +160,14 @@ def _download_wget(url: str, output_path: Path) -> bool:
         return False
 
 
-def _download_http(url: str, output_path: Path, chunk_size: int = 8 * 1024 * 1024):
+def _download_http(url: str, output_path: Path, chunk_size: int = 8 * 1024 * 1024, token: str | None = None):
     """Download using Python requests with streaming. 8MB chunks for speed."""
     tmp_path = output_path.with_suffix(".part")
     downloaded = 0
     headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    
     if tmp_path.exists():
         downloaded = tmp_path.stat().st_size
         headers["Range"] = f"bytes={downloaded}-"
