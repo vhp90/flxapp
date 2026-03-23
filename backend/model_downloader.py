@@ -1,7 +1,7 @@
 """
 Auto-download utilities for CivitAI and HuggingFace models.
 
-- CivitAI: Uses aria2c (16 connections) when available, falls back to fast HTTP streaming.
+- CivitAI: Uses aria2c (multi-connection) when available, falls back to fast HTTP streaming.
 - HuggingFace: Uses huggingface_hub with hf_transfer for fast parallel downloads.
 - Parallel: All model components download simultaneously via ThreadPoolExecutor.
 """
@@ -16,6 +16,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_token(token: str | None) -> str | None:
+    """Convert empty/whitespace-only tokens to None to avoid 'Bearer ' header errors."""
+    if token is None:
+        return None
+    token = token.strip()
+    return token if token else None
 
 
 def _enable_hf_transfer():
@@ -42,9 +50,10 @@ def download_civitai_model(
 ) -> Path:
     """
     Download a model file from CivitAI.
-    Uses aria2c for max speed (16 connections), falls back to streaming HTTP.
+    Uses aria2c for max speed, falls back to streaming HTTP.
     Skips if file already exists and is non-empty.
     """
+    token = _normalize_token(token)
     output = Path(output_path)
     if output.exists() and output.stat().st_size > 100_000:
         logger.info("Model already exists at %s (%.1f GB), skipping download.", output, output.stat().st_size / 1e9)
@@ -52,53 +61,54 @@ def download_civitai_model(
 
     output.parent.mkdir(parents=True, exist_ok=True)
 
+    # CivitAI uses ?token= query param, NOT Bearer header
     url = f"{CIVITAI_API_BASE}/{model_version_id}"
-    headers = {}
     if token:
-        headers["Authorization"] = f"Bearer {token}"
+        url += f"?token={token}"
 
-    # Resolve any redirects to get the final URL (needed for aria2c)
+    # Resolve any redirects to get the final CDN URL (needed for aria2c)
     logger.info("Resolving download URL for CivitAI model version %s...", model_version_id)
+    final_url = url
     try:
-        head = requests.head(url, headers=headers, allow_redirects=True, timeout=30)
-        final_url = head.url
-        # Get file size from headers
-        content_length = int(head.headers.get("content-length", 0))
-        if content_length > 0:
-            logger.info("File size: %.2f GB", content_length / 1e9)
-    except Exception:
-        final_url = url
-        if token:
-            final_url += f"?token={token}"
+        head = requests.head(url, allow_redirects=True, timeout=30)
+        if head.status_code == 200:
+            final_url = head.url
+            content_length = int(head.headers.get("content-length", 0))
+            if content_length > 0:
+                logger.info("File size: %.2f GB", content_length / 1e9)
+        else:
+            logger.warning("HEAD request returned %s, using original URL", head.status_code)
+    except Exception as e:
+        logger.warning("Could not resolve URL: %s, using original", e)
 
-    # Try aria2c first (fastest)
+    # Try aria2c first (fastest — multi-connection to CDN)
     if shutil.which("aria2c"):
         logger.info("Using aria2c for fast multi-connection download...")
-        success = _download_aria2c(final_url, output, headers)
+        success = _download_aria2c(final_url, output)
         if success:
             return output
 
     # Try wget
     if shutil.which("wget"):
         logger.info("Using wget for download...")
-        success = _download_wget(final_url, output, headers)
+        success = _download_wget(final_url, output)
         if success:
             return output
 
     # Fallback to Python requests
     logger.info("Using Python HTTP streaming download...")
-    _download_http(url, output, headers)
+    _download_http(final_url, output)
     return output
 
 
-def _download_aria2c(url: str, output_path: Path, headers: dict) -> bool:
-    """Download using aria2c with 16 connections."""
+def _download_aria2c(url: str, output_path: Path) -> bool:
+    """Download using aria2c with multi-connection + retries."""
     try:
         cmd = [
             "aria2c",
-            "--max-connection-per-server=16",
-            "--split=16",
-            "--min-split-size=4M",
+            "--max-connection-per-server=8",
+            "--split=8",
+            "--min-split-size=8M",
             "--max-concurrent-downloads=1",
             "--file-allocation=none",
             "--dir", str(output_path.parent),
@@ -107,11 +117,13 @@ def _download_aria2c(url: str, output_path: Path, headers: dict) -> bool:
             "--auto-file-renaming=false",
             "--console-log-level=notice",
             "--summary-interval=10",
+            # Retry settings for flaky connections
+            "--max-tries=5",
+            "--retry-wait=3",
+            "--timeout=60",
+            "--connect-timeout=30",
+            url,
         ]
-        # Add auth header if present
-        for k, v in headers.items():
-            cmd.extend(["--header", f"{k}: {v}"])
-        cmd.append(url)
 
         result = subprocess.run(cmd, check=True)
         return result.returncode == 0
@@ -123,7 +135,7 @@ def _download_aria2c(url: str, output_path: Path, headers: dict) -> bool:
         return False
 
 
-def _download_wget(url: str, output_path: Path, headers: dict) -> bool:
+def _download_wget(url: str, output_path: Path) -> bool:
     """Download using wget."""
     try:
         cmd = [
@@ -131,10 +143,8 @@ def _download_wget(url: str, output_path: Path, headers: dict) -> bool:
             "--continue",
             "--progress=bar:force",
             "-O", str(output_path),
+            url,
         ]
-        for k, v in headers.items():
-            cmd.extend(["--header", f"{k}: {v}"])
-        cmd.append(url)
 
         result = subprocess.run(cmd, check=True)
         return result.returncode == 0
@@ -143,10 +153,11 @@ def _download_wget(url: str, output_path: Path, headers: dict) -> bool:
         return False
 
 
-def _download_http(url: str, output_path: Path, headers: dict, chunk_size: int = 8 * 1024 * 1024):
+def _download_http(url: str, output_path: Path, chunk_size: int = 8 * 1024 * 1024):
     """Download using Python requests with streaming. 8MB chunks for speed."""
     tmp_path = output_path.with_suffix(".part")
     downloaded = 0
+    headers = {}
     if tmp_path.exists():
         downloaded = tmp_path.stat().st_size
         headers["Range"] = f"bytes={downloaded}-"
@@ -187,6 +198,7 @@ def ensure_hf_model_cached(model_id: str, token: str | None = None) -> str:
     Returns the model_id (transformers/diffusers will use cached version).
     Uses hf_transfer for speed if available.
     """
+    token = _normalize_token(token)
     _enable_hf_transfer()
 
     from huggingface_hub import snapshot_download
@@ -209,6 +221,7 @@ def ensure_hf_subfolder_cached(
     Download only a specific subfolder from a HuggingFace repo.
     Returns the repo_id (caller uses subfolder= when loading).
     """
+    token = _normalize_token(token)
     _enable_hf_transfer()
 
     from huggingface_hub import snapshot_download
@@ -230,6 +243,7 @@ def ensure_hf_file_cached(
     """
     Download only a specific file from a HuggingFace repo.
     """
+    token = _normalize_token(token)
     _enable_hf_transfer()
 
     from huggingface_hub import hf_hub_download
@@ -263,12 +277,16 @@ def download_all_models_parallel(
     Instead of downloading sequentially (transformer → text encoder → VAE),
     this fires off all downloads simultaneously using a thread pool.
     Each individual download already uses its own parallel strategy:
-      - CivitAI: aria2c with 16 connections
+      - CivitAI: aria2c with multi-connection
       - HuggingFace: hf_transfer (Rust-based parallel chunked downloads)
 
     This function runs them ALL concurrently so total wall time ≈
     max(single download) instead of sum(all downloads).
     """
+    # Normalize tokens once at the top level
+    civitai_token = _normalize_token(civitai_token)
+    hf_token = _normalize_token(hf_token)
+
     _enable_hf_transfer()
 
     tasks: dict[str, tuple] = {}
