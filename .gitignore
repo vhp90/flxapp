@@ -5,3 +5,4 @@ outputs/
 models/
 loras/
 .venv/
+*.ipynb_checkpoints

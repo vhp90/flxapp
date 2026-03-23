@@ -204,9 +204,12 @@ def ensure_hf_model_cached(model_id: str, token: str | None = None) -> str:
     from huggingface_hub import snapshot_download
 
     logger.info("Ensuring HuggingFace model is cached: %s", model_id)
+    # Disable tqdm progress bars to prevent deadlocks in ThreadPoolExecutor
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     local_dir = snapshot_download(
         model_id,
         token=token,
+        max_workers=1,  # We are already parallelizing at the top level
     )
     logger.info("Model cached at: %s", local_dir)
     return model_id  # transformers/diffusers resolve from cache automatically
@@ -227,10 +230,12 @@ def ensure_hf_subfolder_cached(
     from huggingface_hub import snapshot_download
 
     logger.info("Ensuring HF subfolder cached: %s/%s", repo_id, subfolder)
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     snapshot_download(
         repo_id,
         allow_patterns=[f"{subfolder}/*"],
         token=token,
+        max_workers=1,
     )
     return repo_id
 
@@ -249,6 +254,7 @@ def ensure_hf_file_cached(
     from huggingface_hub import hf_hub_download
 
     logger.info("Ensuring HF file cached: %s/%s", repo_id, filename)
+    os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
     hf_hub_download(
         repo_id,
         filename,
