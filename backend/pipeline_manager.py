@@ -65,6 +65,7 @@ def _patch_diffusers_flux2_key_map():
             normalized_checkpoint = {
                 key.removeprefix("model.diffusion_model."): value
                 for key, value in checkpoint.items()
+                if value.dim() > 0  # Filter out 0-dimension scalars (FP8 scales) that crash diffusers
             }
             return original_converter(dict(normalized_checkpoint), **kwargs)
 
